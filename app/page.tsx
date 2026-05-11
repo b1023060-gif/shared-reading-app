@@ -251,14 +251,23 @@ export default function Home() {
 
               return (
                 <div
-                  key={index}
-                  className={`relative mt-8 first:mt-0 rounded-2xl py-3 pl-24 pr-12 transition sm:pl-40 sm:pr-20 ${
-                    isActive ? "bg-yellow-50" : ""
-                  }`}
-                  onPointerEnter={() => updateReadingPositionByCursor(index)}
-                  onPointerMove={() => updateReadingPositionByCursor(index)}
-                  onClick={() => updateReadingPositionByCursor(index)}
-                >
+  key={index}
+  className={`relative mt-8 first:mt-0 rounded-2xl py-3 pl-24 pr-12 transition sm:pl-40 sm:pr-20 ${
+    isActive ? "bg-yellow-50" : ""
+  }`}
+  onPointerEnter={(e) => {
+    if (e.pointerType === "mouse") {
+      updateReadingPositionByCursor(index);
+    }
+  }}
+  onPointerMove={(e) => {
+    if (e.pointerType === "mouse") {
+      updateReadingPositionByCursor(index);
+    }
+  }}
+  onPointerDown={() => updateReadingPositionByCursor(index)}
+  onClick={() => updateReadingPositionByCursor(index)}
+>
                   <div className="absolute left-0 top-2 flex h-[calc(100%-16px)] gap-2">
                     {readersHere.map((reader, readerIndex) => (
                       <div
