@@ -409,20 +409,12 @@ export default function Home() {
   const [reactionComment, setReactionComment] = useState("");
 
   const [isAutoScroll, setIsAutoScroll] = useState(false);
-  const [autoSpeedMode, setAutoSpeedMode] = useState<AutoSpeedMode>("normal");
+  const [autoSpeed, setAutoSpeed] = useState(17);
 
   // オート時はマーカーを飛ばさず、読書面を少しずつ横へ流す。
   // 数字を大きくすると速くなる。
-  const BASE_SPEED_MAP: Record<AutoSpeedMode, number> = {
-  slow: 11,
-  normal: 17,
-  fast: 23,
-};
-
-const AUTO_SCROLL_SPEED =
-  layoutMode === "grouped"
-    ? BASE_SPEED_MAP[autoSpeedMode] * 1.7
-    : BASE_SPEED_MAP[autoSpeedMode];
+  const AUTO_SCROLL_SPEED =
+  layoutMode === "grouped" ? autoSpeed * 1.7 : autoSpeed;
 
   const paragraphRefs = useRef<(HTMLDivElement | null)[]>([]);
   const currentParagraphIndexRef = useRef(0);
@@ -1057,7 +1049,7 @@ const AUTO_SCROLL_SPEED =
                 : "text-gray-500"
             }`}
           >
-            共有を見る
+            みんなと読む
           </button>
         </div>
 
@@ -1096,65 +1088,54 @@ const AUTO_SCROLL_SPEED =
         </div>
 
         <div className="rounded-2xl bg-white p-4 shadow-sm">
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setIsAutoScroll((prev) => !prev)}
-              className={`rounded-xl px-4 py-2 text-sm font-bold transition ${
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-bold text-gray-800">
+                オート読書
+              </p>
+              <p className="mt-1 text-xs font-medium text-gray-500">
+                0にすると停止します。速度は自分の画面だけに反映されます。
+              </p>
+            </div>
+
+            <span
+              className={`rounded-full px-3 py-1 text-xs font-bold ${
                 isAutoScroll
-                  ? "bg-yellow-300 text-gray-900 shadow-sm"
-                  : "bg-gray-100 text-gray-700"
+                  ? "bg-yellow-300 text-gray-900"
+                  : "bg-gray-100 text-gray-500"
               }`}
             >
-              {isAutoScroll ? "オート停止" : "オート開始"}
-            </button>
-
-            <span className="text-xs font-bold text-gray-500">
-              自動で横に流れます
+              {isAutoScroll ? `${autoSpeed}px/秒` : "停止中"}
             </span>
           </div>
 
-          <div className="mt-3 grid grid-cols-3 gap-2 rounded-xl bg-gray-100 p-1">
-            <button
-              type="button"
-              onClick={() => setAutoSpeedMode("slow")}
-              className={`rounded-lg px-3 py-2 text-xs font-bold ${
-                autoSpeedMode === "slow"
-                  ? "bg-yellow-300 text-gray-900"
-                  : "text-gray-500"
-              }`}
-            >
-              遅め
-            </button>
+          <input
+            type="range"
+            min="0"
+            max="45"
+            step="1"
+            value={isAutoScroll ? autoSpeed : 0}
+            onChange={(event) => {
+              const nextSpeed = Number(event.target.value);
 
-            <button
-              type="button"
-              onClick={() => setAutoSpeedMode("normal")}
-              className={`rounded-lg px-3 py-2 text-xs font-bold ${
-                autoSpeedMode === "normal"
-                  ? "bg-yellow-300 text-gray-900"
-                  : "text-gray-500"
-              }`}
-            >
-              ふつう
-            </button>
+              if (nextSpeed <= 0) {
+                setIsAutoScroll(false);
+                return;
+              }
 
-            <button
-              type="button"
-              onClick={() => setAutoSpeedMode("fast")}
-              className={`rounded-lg px-3 py-2 text-xs font-bold ${
-                autoSpeedMode === "fast"
-                  ? "bg-yellow-300 text-gray-900"
-                  : "text-gray-500"
-              }`}
-            >
-              早め
-            </button>
+              setAutoSpeed(nextSpeed);
+              setIsAutoScroll(true);
+            }}
+            className="w-full accent-yellow-300"
+            aria-label="オート読書速度"
+          />
+
+          <div className="mt-2 flex justify-between text-xs font-bold text-gray-400">
+            <span>停止</span>
+            <span>ゆっくり</span>
+            <span>ふつう</span>
+            <span>速い</span>
           </div>
-
-          <p className="mt-3 text-xs leading-relaxed text-gray-500">
-            画面がゆっくり流れ、読んでいる位置が共有されます
-          </p>
         </div>
       </div>
     </div>
