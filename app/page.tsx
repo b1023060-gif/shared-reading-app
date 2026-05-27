@@ -221,18 +221,28 @@ function cleanAozoraText(
 
     さらに保険として、途中に同じタイトル・作者行が残っても除外する。
   */
-  const contentLines = rawLines.slice(2);
+  const rawLines = beforeBibliography
+  .replace(/-{5,}[\s\S]*?-{5,}/g, "")
+  .split("\n")
+  .map((line) => line.trim())
+  .filter(Boolean);
 
-  const lines = contentLines.filter((line) => {
-    const key = normalizeForCompare(line);
+const lines = rawLines.filter((line, index) => {
+  const key = normalizeForCompare(line);
 
-    if (!key) return false;
+  if (!key) return false;
 
-    if (key === titleKey) return false;
-    if (key === authorKey) return false;
-
+  // 子見出しは必ず残す
+  if (isChapterHeading(line)) {
     return true;
-  });
+  }
+
+  // 本文の先頭付近にあるタイトル・著者だけ消す
+  if (index <= 5 && key === titleKey) return false;
+  if (index <= 5 && key === authorKey) return false;
+
+  return true;
+});
 
   const paragraphs: Paragraph[] = [];
   let buffer = "";
