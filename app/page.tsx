@@ -179,12 +179,17 @@ function normalizeScannedJapaneseText(text: string) {
 }
 
 function normalizeForCompare(text: string) {
-  return text.replace(/\s+/g, "").toLowerCase();
+  return text
+    .replace(/\s+/g, "")
+    .replace(/[　]/g, "")
+    .replace(/[「」『』【】（）()]/g, "")
+    .replace(/[‐－―ー]/g, "-")
+    .toLowerCase()
+    .trim();
 }
 
 function isChapterHeading(line: string) {
-  // 例: "5 武 藤 澄 香" → normalize後は "5 武藤澄香"
-  return /^\d+\s+[^、。！？!?「」『』【】（）()]{1,20}$/.test(line);
+  return /^\d+\s*[^、。！？!?「」『』【】（）()]{1,20}$/.test(line);
 }
 
 function decorateText(text: string) {
@@ -213,37 +218,6 @@ function cleanAozoraText(
     .map((line) => line.trim())
     .filter(Boolean);
 
-  /*
-    本文先頭にあるタイトル・作者を本文から除外する。
-    青空文庫系・OCR由来のtxtでは、先頭2行が
-    「タイトル」「作者」になっていることが多いため、
-    まず先頭2行を本文候補から外す。
-
-    さらに保険として、途中に同じタイトル・作者行が残っても除外する。
-  */
-  const rawLines = beforeBibliography
-  .replace(/-{5,}[\s\S]*?-{5,}/g, "")
-  .split("\n")
-  .map((line) => line.trim())
-  .filter(Boolean);
-
-const lines = rawLines.filter((line, index) => {
-  const key = normalizeForCompare(line);
-
-  if (!key) return false;
-
-  // 子見出しは必ず残す
-  if (isChapterHeading(line)) {
-    return true;
-  }
-
-  // 本文の先頭付近にあるタイトル・著者だけ消す
-  if (index <= 5 && key === titleKey) return false;
-  if (index <= 5 && key === authorKey) return false;
-
-  return true;
-});
-
   const paragraphs: Paragraph[] = [];
   let buffer = "";
 
@@ -258,11 +232,79 @@ const lines = rawLines.filter((line, index) => {
     buffer = "";
   };
 
-  lines.forEach((line) => {
+  const shouldRemoveTitleOrAuthor = (line: string, index: number) => {
+    const key = normalizeForCompare(line);
+
+    if (!key) return true;
+
+    // 子見出しは必ず残す。
+    // 例:「5武藤澄香」「5 武藤澄香」
+    if (isChapterHeading(line)) return false;
+
+    // タイトル・著者は本文から除外する。
+    // 完全一致はどこにあっても除外する。
+    if (titleKey && key === titleKey) return true;
+    if (authorKey && key === authorKey) return true;
+
+    // 先頭付近だけ、タイトル＋著者がくっついた行も除外する。
+    // 例:「吾輩は猫である夏目漱石」
+    if (index <= 8) {
+      const titleAndAuthor = `${titleKey}${authorKey}`;
+      const authorAndTitle = `${authorKey}${titleKey}`;
+
+      if (titleAndAuthor && key === titleAndAuthor) return true;
+      if (authorAndTitle && key === authorAndTitle) return true;
+
+      if (
+        titleKey &&
+        authorKey &&
+        key.includes(titleKey) &&
+        key.includes(authorKey) &&
+        key.length <= titleKey.length + authorKey.length + 4
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  };
+
+  rawLines.forEach((originalLine, index) => {
+    if (shouldRemoveTitleOrAuthor(originalLine, index)) return;
+
+    let line = originalLine;
+
+    /*
+      子見出しと本文が同じ行にくっついた場合にも対応する。
+      例: 5武藤澄香「なんかあったかいものでも飲む？」
+      → 見出し「5 武藤澄香」と本文「「なんか...」」に分ける。
+    */
+    const headingWithBody = line.match(
+      /^(\d+)\s*([^、。！？!?「」『』【】（）()\d]{1,20})(?=「|『)/,
+    );
+
+    if (headingWithBody) {
+      flushBuffer();
+
+      const headingText = `${headingWithBody[1]} ${headingWithBody[2].replace(
+        /\s+/g,
+        "",
+      )}`;
+
+      paragraphs.push({
+        text: decorateText(headingText),
+        isHeading: true,
+      });
+
+      line = line.slice(headingWithBody[0].length).trim();
+
+      if (!line) return;
+    }
+
     if (isChapterHeading(line)) {
       flushBuffer();
 
-      const headingMatch = line.match(/^(\d+)\s+(.+)$/);
+      const headingMatch = line.match(/^(\d+)\s*(.+)$/);
       const headingText = headingMatch
         ? `${headingMatch[1]} ${headingMatch[2].replace(/\s+/g, "")}`
         : line.replace(/\s+/g, "");
@@ -277,7 +319,7 @@ const lines = rawLines.filter((line, index) => {
 
     buffer += line;
 
-    // スキャン由来の途中改行は無視して、文末まで結合する
+    // スキャン由来の途中改行は無視して、文末まで結合する。
     if (/[。！？!?）」』】）]$/.test(line)) {
       flushBuffer();
     }
