@@ -111,7 +111,10 @@ function normalizeParticipant(
 
 function normalizeReaction(raw: Record<string, unknown>): Reaction {
   return {
-    storyKey: typeof raw.storyKey === "string" ? raw.storyKey : "",
+    storyKey:
+      typeof raw.storyKey === "string"
+        ? (raw.storyKey as StoryKey)
+        : "",
     emoji: typeof raw.emoji === "string" ? raw.emoji : "👍",
     comment: typeof raw.comment === "string" ? raw.comment : "",
     paragraphIndex: Number(raw.paragraphIndex ?? 0),
@@ -201,40 +204,35 @@ function cleanAozoraText(
 
   const beforeBibliography = normalizedText.split("底本：")[0];
 
-const titleKey = normalizeForCompare(title);
-const authorKey = normalizeForCompare(author);
+  const titleKey = normalizeForCompare(title);
+  const authorKey = normalizeForCompare(author);
 
-const rawLines = beforeBibliography
-  .replace(/-{5,}[\s\S]*?-{5,}/g, "")
-  .split("\n")
-  .map((line) => line.trim())
-  .filter(Boolean);
+  const rawLines = beforeBibliography
+    .replace(/-{5,}[\s\S]*?-{5,}/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
 
-/*
-  タイトル・作者だけ除外する。
-  ただし「5 武藤澄香」みたいな子見出しは残す。
-*/
-const lines = rawLines.filter((line, index) => {
-  const key = normalizeForCompare(line);
+  /*
+    本文先頭にあるタイトル・作者を本文から除外する。
+    青空文庫系・OCR由来のtxtでは、先頭2行が
+    「タイトル」「作者」になっていることが多いため、
+    まず先頭2行を本文候補から外す。
 
-  if (!key) return false;
+    さらに保険として、途中に同じタイトル・作者行が残っても除外する。
+  */
+  const contentLines = rawLines.slice(2);
 
-  // 子見出しは絶対に残す
-  if (isChapterHeading(line)) {
+  const lines = contentLines.filter((line) => {
+    const key = normalizeForCompare(line);
+
+    if (!key) return false;
+
+    if (key === titleKey) return false;
+    if (key === authorKey) return false;
+
     return true;
-  }
-
-  // 先頭付近のタイトル・作者だけ除外
-  if (index <= 3 && key === titleKey) {
-    return false;
-  }
-
-  if (index <= 3 && key === authorKey) {
-    return false;
-  }
-
-  return true;
-});
+  });
 
   const paragraphs: Paragraph[] = [];
   let buffer = "";
