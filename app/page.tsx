@@ -59,11 +59,175 @@ type ReadingUnit = {
   isHeading?: boolean;
 };
 
+type ReadingProgress = {
+  storyKey: StoryKey;
+  layoutMode: LayoutMode;
+  currentParagraphIndex: number;
+  scrollLeft: number;
+  savedAt: number;
+  readingUnitsLength?: number;
+  percent?: number;
+};
+
+type StoryProgressSummary = {
+  percent: number;
+  layoutMode: LayoutMode;
+  savedAt: number;
+};
+
+type LastReadingState = {
+  storyKey: StoryKey;
+  layoutMode: LayoutMode;
+  savedAt: number;
+};
+
 const MAX_PARTICIPANTS = 3;
 const ACTIVE_LIMIT_MS = 5 * 60 * 1000;
 
 const PARTICIPANT_ID_KEY = "sharedReadingParticipantId_v10";
 const PARTICIPANT_JOINED_AT_KEY = "sharedReadingParticipantJoinedAt_v10";
+const READING_PROGRESS_KEY_PREFIX = "sharedReadingProgress_v1";
+const LAST_READING_STATE_KEY = "sharedReadingLastState_v1";
+
+function getReadingProgressKey(storyKey: StoryKey, layoutMode: LayoutMode) {
+  return `${READING_PROGRESS_KEY_PREFIX}_${storyKey}_${layoutMode}`;
+}
+
+function isStoryKey(value: unknown): value is StoryKey {
+  return typeof value === "string" && value in stories;
+}
+
+function saveLastReadingState(storyKey: StoryKey, layoutMode: LayoutMode) {
+  const state: LastReadingState = {
+    storyKey,
+    layoutMode,
+    savedAt: Date.now(),
+  };
+
+  localStorage.setItem(LAST_READING_STATE_KEY, JSON.stringify(state));
+}
+
+function loadLastReadingState() {
+  const rawState = localStorage.getItem(LAST_READING_STATE_KEY);
+
+  if (!rawState) return null;
+
+  try {
+    const state = JSON.parse(rawState) as LastReadingState;
+
+    if (!isStoryKey(state.storyKey)) return null;
+    if (state.layoutMode !== "normal" && state.layoutMode !== "grouped") {
+      return null;
+    }
+
+    return state;
+  } catch (error) {
+    console.error("前回読書状態の読み込み失敗", error);
+    return null;
+  }
+}
+
+function loadProgressSummaryForStory(storyKey: StoryKey) {
+  if (typeof window === "undefined") return null;
+
+  const progressCandidates = (["normal", "grouped"] as LayoutMode[])
+    .map((targetLayoutMode) => {
+      const rawProgress = localStorage.getItem(
+        getReadingProgressKey(storyKey, targetLayoutMode),
+      );
+
+      if (!rawProgress) return null;
+
+      try {
+        const progress = JSON.parse(rawProgress) as ReadingProgress;
+
+        if (progress.storyKey !== storyKey) return null;
+        if (
+          progress.layoutMode !== "normal" &&
+          progress.layoutMode !== "grouped"
+        ) {
+          return null;
+        }
+
+        const percent =
+          typeof progress.percent === "number"
+            ? progress.percent
+            : typeof progress.readingUnitsLength === "number"
+              ? getPercent(
+                  progress.currentParagraphIndex,
+                  progress.readingUnitsLength,
+                )
+              : null;
+
+        if (percent === null) return null;
+
+        return {
+          percent: Math.max(0, Math.min(100, percent)),
+          layoutMode: progress.layoutMode,
+          savedAt: progress.savedAt,
+        } satisfies StoryProgressSummary;
+      } catch (error) {
+        console.error("作品別進捗の読み込み失敗", error);
+        return null;
+      }
+    })
+    .filter((progress): progress is StoryProgressSummary => progress !== null)
+    .sort((a, b) => b.savedAt - a.savedAt);
+
+  return progressCandidates[0] ?? null;
+}
+
+function loadAllStoryProgressSummaries() {
+  if (typeof window === "undefined") {
+    return {} as Partial<Record<StoryKey, StoryProgressSummary>>;
+  }
+
+  return Object.keys(stories).reduce(
+    (summaryMap, key) => {
+      const storyKey = key as StoryKey;
+      const summary = loadProgressSummaryForStory(storyKey);
+
+      if (summary) {
+        summaryMap[storyKey] = summary;
+      }
+
+      return summaryMap;
+    },
+    {} as Partial<Record<StoryKey, StoryProgressSummary>>,
+  );
+}
+
+function writeReadingProgress(
+  storyKey: StoryKey,
+  layoutMode: LayoutMode,
+  currentParagraphIndex: number,
+  readingUnitsLength: number,
+  scrollLeft: number,
+) {
+  if (readingUnitsLength <= 0) return;
+
+  const safeIndex = Math.max(
+    0,
+    Math.min(currentParagraphIndex, readingUnitsLength - 1),
+  );
+
+  const progress: ReadingProgress = {
+    storyKey,
+    layoutMode,
+    currentParagraphIndex: safeIndex,
+    scrollLeft,
+    savedAt: Date.now(),
+    readingUnitsLength,
+    percent: getPercent(safeIndex, readingUnitsLength),
+  };
+
+  localStorage.setItem(
+    getReadingProgressKey(progress.storyKey, progress.layoutMode),
+    JSON.stringify(progress),
+  );
+
+  saveLastReadingState(storyKey, layoutMode);
+}
 
 function createParticipantId() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
@@ -112,9 +276,7 @@ function normalizeParticipant(
 function normalizeReaction(raw: Record<string, unknown>): Reaction {
   return {
     storyKey:
-      typeof raw.storyKey === "string"
-        ? (raw.storyKey as StoryKey)
-        : "",
+      typeof raw.storyKey === "string" ? (raw.storyKey as StoryKey) : "",
     emoji: typeof raw.emoji === "string" ? raw.emoji : "👍",
     comment: typeof raw.comment === "string" ? raw.comment : "",
     paragraphIndex: Number(raw.paragraphIndex ?? 0),
@@ -411,18 +573,29 @@ export default function Home() {
   const [isAutoScroll, setIsAutoScroll] = useState(false);
   const [autoSpeed, setAutoSpeed] = useState(17);
 
+  const [readingProgressNotice, setReadingProgressNotice] = useState("");
+  const [storyProgressSummaries, setStoryProgressSummaries] = useState<
+    Partial<Record<StoryKey, StoryProgressSummary>>
+  >({});
+
   // オート時はマーカーを飛ばさず、読書面を少しずつ横へ流す。
   // 数字を大きくすると速くなる。
   const AUTO_SCROLL_SPEED =
-  layoutMode === "grouped" ? autoSpeed * 1.7 : autoSpeed;
+    layoutMode === "grouped" ? autoSpeed * 1.7 : autoSpeed;
 
   const paragraphRefs = useRef<(HTMLDivElement | null)[]>([]);
   const currentParagraphIndexRef = useRef(0);
   const nameRef = useRef("");
   const selectedStoryRef = useRef<StoryKey>("wagahai");
+  const layoutModeRef = useRef<LayoutMode>("normal");
+  const readingUnitsLengthRef = useRef(0);
+  const didLoadLastReadingStateRef = useRef(false);
+  const isRestoringProgressRef = useRef(false);
+  const textLoadRequestIdRef = useRef(0);
   const readingAreaRef = useRef<HTMLDivElement | null>(null);
   const isProgrammaticScrollRef = useRef(false);
   const scrollFrameRef = useRef<number | null>(null);
+  const progressNoticeTimerRef = useRef<number | null>(null);
 
   const readingUnits = useMemo(() => {
     return buildReadingUnits(paragraphs);
@@ -484,6 +657,117 @@ export default function Home() {
     });
   };
 
+  const showReadingProgressNotice = (message: string) => {
+    setReadingProgressNotice(message);
+
+    if (progressNoticeTimerRef.current !== null) {
+      window.clearTimeout(progressNoticeTimerRef.current);
+    }
+
+    progressNoticeTimerRef.current = window.setTimeout(() => {
+      setReadingProgressNotice("");
+    }, 2200);
+  };
+
+  const refreshStoryProgressSummaries = () => {
+    setStoryProgressSummaries(loadAllStoryProgressSummaries());
+  };
+
+  const saveReadingProgress = (
+    nextIndex: number = currentParagraphIndexRef.current,
+    options: { showNotice?: boolean } = {},
+  ) => {
+    // 復元直後はブラウザの自動スクロールイベントが走ることがある。
+    // ここで保存すると、せっかくの前回位置が0%で上書きされるので止める。
+    if (isRestoringProgressRef.current) return;
+
+    const readingArea = readingAreaRef.current;
+
+    writeReadingProgress(
+      selectedStoryRef.current,
+      layoutModeRef.current,
+      nextIndex,
+      readingUnits.length,
+      readingArea?.scrollLeft ?? 0,
+    );
+
+    refreshStoryProgressSummaries();
+
+    if (options.showNotice) {
+      showReadingProgressNotice("自動保存しました");
+    }
+  };
+
+  const loadReadingProgress = (
+    storyKey: StoryKey,
+    targetLayoutMode: LayoutMode,
+  ) => {
+    const rawProgress = localStorage.getItem(
+      getReadingProgressKey(storyKey, targetLayoutMode),
+    );
+
+    if (!rawProgress) return null;
+
+    try {
+      const progress = JSON.parse(rawProgress) as ReadingProgress;
+
+      if (
+        progress.storyKey !== storyKey ||
+        progress.layoutMode !== targetLayoutMode
+      ) {
+        return null;
+      }
+
+      return progress;
+    } catch (error) {
+      console.error("読書位置の読み込み失敗", error);
+      return null;
+    }
+  };
+
+  const restoreReadingProgress = (
+    progress: ReadingProgress,
+    targetLayoutMode: LayoutMode = layoutMode,
+  ) => {
+    if (readingUnits.length === 0) return;
+
+    isRestoringProgressRef.current = true;
+
+    const safeIndex = Math.max(
+      0,
+      Math.min(progress.currentParagraphIndex, readingUnits.length - 1),
+    );
+
+    setCurrentParagraphIndex(safeIndex);
+    currentParagraphIndexRef.current = safeIndex;
+    updateLocalParticipant(safeIndex);
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const readingArea = readingAreaRef.current;
+
+        if (!readingArea) {
+          isRestoringProgressRef.current = false;
+          return;
+        }
+
+        // まず保存インデックスに合わせる。
+        // scrollLeft が環境差で合わない時も、ここで最低限その区切りへ戻せる。
+        scrollToFocus(safeIndex, targetLayoutMode);
+
+        window.setTimeout(() => {
+          if (progress.scrollLeft > 0) {
+            readingArea.scrollLeft = progress.scrollLeft;
+          }
+
+          window.setTimeout(() => {
+            isRestoringProgressRef.current = false;
+          }, 350);
+        }, 80);
+      });
+    });
+  };
+
   useEffect(() => {
     let savedId = localStorage.getItem(PARTICIPANT_ID_KEY);
 
@@ -504,6 +788,25 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    refreshStoryProgressSummaries();
+  }, []);
+
+  useEffect(() => {
+    const lastState = loadLastReadingState();
+
+    if (lastState) {
+      setSelectedStory(lastState.storyKey);
+      setLayoutMode(lastState.layoutMode);
+    }
+
+    didLoadLastReadingStateRef.current = true;
+  }, []);
+
+  // 前回読んだ作品・表示モードは、実際に読書位置を書き込む時だけ保存する。
+  // ここで selectedStory/layoutMode の変更だけを保存すると、
+  // 初回表示時に初期値の wagahai/normal で前回状態を上書きしてしまう。
+
+  useEffect(() => {
     currentParagraphIndexRef.current = currentParagraphIndex;
   }, [currentParagraphIndex]);
 
@@ -516,25 +819,57 @@ export default function Home() {
   }, [selectedStory]);
 
   useEffect(() => {
+    layoutModeRef.current = layoutMode;
+  }, [layoutMode]);
+
+  useEffect(() => {
+    readingUnitsLengthRef.current = readingUnits.length;
+  }, [readingUnits.length]);
+
+  useEffect(() => {
     const story = stories[selectedStory];
+    const requestId = textLoadRequestIdRef.current + 1;
+    textLoadRequestIdRef.current = requestId;
 
     const loadText = async () => {
+      // 作品切り替え中の0%保存を防ぐ。
+      isRestoringProgressRef.current = true;
       setCurrentParagraphIndex(0);
       currentParagraphIndexRef.current = 0;
       paragraphRefs.current = [];
 
-      if (!("textFile" in story)) return;
+      if (!("textFile" in story)) {
+        if (textLoadRequestIdRef.current === requestId) {
+          setParagraphs([]);
+          isRestoringProgressRef.current = false;
+        }
+        return;
+      }
 
-      const response = await fetch(story.textFile);
-      const rawText = await response.text();
+      try {
+        const response = await fetch(story.textFile);
+        const rawText = await response.text();
 
-      const cleanedParagraphs = cleanAozoraText(
-        rawText,
-        story.title,
-        story.author,
-      );
+        // 直前に別作品へ切り替わっていたら、古いfetch結果は捨てる。
+        // これがないと「吾輩」の読み込み結果が後から来て、
+        // インザメガチャーチの保存位置復元を邪魔することがある。
+        if (textLoadRequestIdRef.current !== requestId) return;
 
-      setParagraphs(cleanedParagraphs);
+        const cleanedParagraphs = cleanAozoraText(
+          rawText,
+          story.title,
+          story.author,
+        );
+
+        setParagraphs(cleanedParagraphs);
+      } catch (error) {
+        console.error("本文読み込み失敗", error);
+
+        if (textLoadRequestIdRef.current === requestId) {
+          setParagraphs([]);
+          isRestoringProgressRef.current = false;
+        }
+      }
     };
 
     loadText();
@@ -543,8 +878,27 @@ export default function Home() {
   useEffect(() => {
     if (readingUnits.length === 0) return;
 
+    const savedProgress = loadReadingProgress(selectedStory, layoutMode);
+
+    if (savedProgress) {
+      restoreReadingProgress(savedProgress, layoutMode);
+      writeReadingProgress(
+        selectedStory,
+        layoutMode,
+        savedProgress.currentParagraphIndex,
+        readingUnits.length,
+        savedProgress.scrollLeft,
+      );
+      refreshStoryProgressSummaries();
+      return;
+    }
+
     resetToBeginning(layoutMode);
-  }, [readingUnits.length]);
+
+    window.setTimeout(() => {
+      isRestoringProgressRef.current = false;
+    }, 350);
+  }, [readingUnits.length, selectedStory, layoutMode]);
 
   useEffect(() => {
     const q = query(collection(db, "participants"));
@@ -562,6 +916,14 @@ export default function Home() {
 
   useEffect(() => {
     const handleLeave = async () => {
+      writeReadingProgress(
+        selectedStoryRef.current,
+        layoutModeRef.current,
+        currentParagraphIndexRef.current,
+        readingUnitsLengthRef.current,
+        readingAreaRef.current?.scrollLeft ?? 0,
+      );
+
       if (!participantId) return;
 
       try {
@@ -712,6 +1074,7 @@ export default function Home() {
       setCurrentParagraphIndex(nearestIndex);
       currentParagraphIndexRef.current = nearestIndex;
       updateLocalParticipant(nearestIndex);
+      saveReadingProgress(nearestIndex);
 
       if (isAdmitted) {
         saveParticipantToFirestore(nameRef.current, nearestIndex);
@@ -736,6 +1099,7 @@ export default function Home() {
 
     requestAnimationFrame(() => {
       scrollToFocus(safeIndex, mode);
+      saveReadingProgress(safeIndex);
 
       window.setTimeout(() => {
         isProgrammaticScrollRef.current = false;
@@ -797,6 +1161,7 @@ export default function Home() {
       setCurrentParagraphIndex(nearestIndex);
       currentParagraphIndexRef.current = nearestIndex;
       updateLocalParticipant(nearestIndex);
+      saveReadingProgress(nearestIndex);
 
       if (isAdmitted) {
         saveParticipantToFirestore(nameRef.current, nearestIndex);
@@ -979,172 +1344,199 @@ export default function Home() {
     >
       <div className="mx-auto max-w-7xl">
         <header className="mb-5 overflow-hidden rounded-[2rem] border border-[#ebe3d5] bg-white shadow-[0_18px_45px_rgba(15,23,42,0.08)]">
-  <div className="grid gap-6 p-7 lg:grid-cols-[1fr_520px] lg:items-center">
-    <div className="relative">
-      <div className="mb-4 flex items-center gap-3">
-        <div className="h-10 w-1 rounded-full bg-[#c79a53]" />
-        <p className="text-xs font-bold tracking-[0.35em] text-[#b98234]">
-          SHARED READING
-        </p>
-      </div>
+          <div className="grid gap-6 p-7 lg:grid-cols-[1fr_520px] lg:items-center">
+            <div className="relative">
+              <div className="mb-4 flex items-center gap-3">
+                <div className="h-10 w-1 rounded-full bg-[#c79a53]" />
+                <p className="text-xs font-bold tracking-[0.35em] text-[#b98234]">
+                  SHARED READING
+                </p>
+              </div>
 
-      <h1 className="font-serif text-5xl font-bold tracking-[-0.04em] text-gray-950">
-        {stories[selectedStory].title}
-      </h1>
+              <h1 className="font-serif text-5xl font-bold tracking-[-0.04em] text-gray-950">
+                {stories[selectedStory].title}
+              </h1>
 
-      <p className="mt-3 text-lg font-semibold text-gray-500">
-        {stories[selectedStory].author}
-      </p>
-
-      <div className="mt-6 inline-flex items-center gap-3 rounded-2xl border border-[#eee3d2] bg-[#fffaf0] px-5 py-3 text-sm font-bold text-gray-700">
-        <span className="text-[#b98234]">👥</span>
-        <span>
-          参加中：
-          <strong className="ml-1 text-lg text-[#b98234]">
-            {admittedParticipants.length}/{MAX_PARTICIPANTS}
-          </strong>
-        </span>
-      </div>
-    </div>
-
-    <div className="rounded-[1.5rem] border border-gray-100 bg-gray-50/80 p-4">
-      <div className="grid gap-3">
-        <select
-          value={selectedStory}
-          onChange={(event) => {
-            setIsAutoScroll(false);
-            setSelectedStory(event.target.value as StoryKey);
-            setSelectedWord("");
-            setSearchWord("");
-            setWikiMeaning("");
-          }}
-          className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm font-bold shadow-sm outline-none"
-        >
-          {Object.entries(stories).map(([key, story]) => (
-            <option key={key} value={key}>
-              {story.title}
-            </option>
-          ))}
-        </select>
-
-        <div className="grid grid-cols-2 gap-2 rounded-2xl bg-gray-100 p-1">
-          <button
-            type="button"
-            onClick={() => setReaderMode("reading")}
-            className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
-              readerMode === "reading"
-                ? "bg-white text-gray-950 shadow-sm"
-                : "text-gray-500"
-            }`}
-          >
-            一人読み
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setReaderMode("shared")}
-            className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
-              readerMode === "shared"
-                ? "bg-white text-gray-950 shadow-sm"
-                : "text-gray-500"
-            }`}
-          >
-            みんなと読む
-          </button>
-        </div>
-
-        <div className="grid grid-cols-2 gap-2 rounded-2xl bg-gray-100 p-1">
-          <button
-            type="button"
-            onClick={() => {
-              setIsAutoScroll(false);
-              setLayoutMode("normal");
-              resetToBeginning("normal");
-            }}
-            className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
-              layoutMode === "normal"
-                ? "bg-white text-gray-950 shadow-sm"
-                : "text-gray-500"
-            }`}
-          >
-            通常段落
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setIsAutoScroll(false);
-              setLayoutMode("grouped");
-              resetToBeginning("grouped");
-            }}
-            className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
-              layoutMode === "grouped"
-                ? "bg-white text-gray-950 shadow-sm"
-                : "text-gray-500"
-            }`}
-          >
-            2文グループ
-          </button>
-        </div>
-
-        <div className="rounded-2xl bg-white p-4 shadow-sm">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div>
-              <p className="text-sm font-bold text-gray-800">
-                オート読書
+              <p className="mt-3 text-lg font-semibold text-gray-500">
+                {stories[selectedStory].author}
               </p>
-              <p className="mt-1 text-xs font-medium text-gray-500">
-                0にすると停止します。速度は自分の画面だけに反映されます。
-              </p>
+
+              <div className="mt-6 inline-flex items-center gap-3 rounded-2xl border border-[#eee3d2] bg-[#fffaf0] px-5 py-3 text-sm font-bold text-gray-700">
+                <span className="text-[#b98234]">👥</span>
+                <span>
+                  参加中：
+                  <strong className="ml-1 text-lg text-[#b98234]">
+                    {admittedParticipants.length}/{MAX_PARTICIPANTS}
+                  </strong>
+                </span>
+              </div>
             </div>
 
-            <span
-              className={`rounded-full px-3 py-1 text-xs font-bold ${
-                isAutoScroll
-                  ? "bg-yellow-300 text-gray-900"
-                  : "bg-gray-100 text-gray-500"
-              }`}
-            >
-              {isAutoScroll ? `${autoSpeed}px/秒` : "停止中"}
-            </span>
+            <div className="rounded-[1.5rem] border border-gray-100 bg-gray-50/80 p-4">
+              <div className="grid gap-3">
+                <select
+                  value={selectedStory}
+                  onChange={(event) => {
+                    setIsAutoScroll(false);
+                    setSelectedStory(event.target.value as StoryKey);
+                    setSelectedWord("");
+                    setSearchWord("");
+                    setWikiMeaning("");
+                  }}
+                  className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm font-bold shadow-sm outline-none"
+                >
+                  {Object.entries(stories).map(([key, story]) => {
+                    const storyKey = key as StoryKey;
+                    const progressSummary = storyProgressSummaries[storyKey];
+                    const progressLabel = progressSummary
+                      ? `（${progressSummary.percent}%）`
+                      : "（未読）";
+
+                    return (
+                      <option key={key} value={key}>
+                        {story.title} {progressLabel}
+                      </option>
+                    );
+                  })}
+                </select>
+
+                <div className="rounded-2xl bg-white px-4 py-3 text-xs font-bold text-gray-500 shadow-sm">
+                  {storyProgressSummaries[selectedStory] ? (
+                    <span>
+                      前回の読書位置：
+                      <span className="text-[#b98234]">
+                        {storyProgressSummaries[selectedStory]?.percent}%
+                      </span>
+                      <span className="ml-2 text-gray-400">
+                        {storyProgressSummaries[selectedStory]?.layoutMode ===
+                        "grouped"
+                          ? "2文グループ"
+                          : "通常段落"}
+                      </span>
+                    </span>
+                  ) : (
+                    <span>この作品はまだ読書位置がありません</span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 rounded-2xl bg-gray-100 p-1">
+                  <button
+                    type="button"
+                    onClick={() => setReaderMode("reading")}
+                    className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
+                      readerMode === "reading"
+                        ? "bg-white text-gray-950 shadow-sm"
+                        : "text-gray-500"
+                    }`}
+                  >
+                    一人読み
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setReaderMode("shared")}
+                    className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
+                      readerMode === "shared"
+                        ? "bg-white text-gray-950 shadow-sm"
+                        : "text-gray-500"
+                    }`}
+                  >
+                    みんなと読む
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 rounded-2xl bg-gray-100 p-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAutoScroll(false);
+                      setLayoutMode("normal");
+                      resetToBeginning("normal");
+                    }}
+                    className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
+                      layoutMode === "normal"
+                        ? "bg-white text-gray-950 shadow-sm"
+                        : "text-gray-500"
+                    }`}
+                  >
+                    通常段落
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAutoScroll(false);
+                      setLayoutMode("grouped");
+                      resetToBeginning("grouped");
+                    }}
+                    className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
+                      layoutMode === "grouped"
+                        ? "bg-white text-gray-950 shadow-sm"
+                        : "text-gray-500"
+                    }`}
+                  >
+                    2文グループ
+                  </button>
+                </div>
+
+                <div className="rounded-2xl bg-white p-4 shadow-sm">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-bold text-gray-800">
+                        オート読書
+                      </p>
+                      <p className="mt-1 text-xs font-medium text-gray-500">
+                        0にすると停止します。速度は自分の画面だけに反映されます。
+                      </p>
+                    </div>
+
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-bold ${
+                        isAutoScroll
+                          ? "bg-yellow-300 text-gray-900"
+                          : "bg-gray-100 text-gray-500"
+                      }`}
+                    >
+                      {isAutoScroll ? `${autoSpeed}px/秒` : "停止中"}
+                    </span>
+                  </div>
+
+                  <input
+                    type="range"
+                    min="0"
+                    max="45"
+                    step="1"
+                    value={isAutoScroll ? autoSpeed : 0}
+                    onChange={(event) => {
+                      const nextSpeed = Number(event.target.value);
+
+                      if (nextSpeed <= 0) {
+                        setIsAutoScroll(false);
+                        return;
+                      }
+
+                      setAutoSpeed(nextSpeed);
+                      setIsAutoScroll(true);
+                    }}
+                    className="w-full accent-yellow-300"
+                    aria-label="オート読書速度"
+                  />
+
+                  <div className="mt-2 flex justify-between text-xs font-bold text-gray-400">
+                    <span>停止</span>
+                    <span>ゆっくり</span>
+                    <span>ふつう</span>
+                    <span>速い</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
 
-          <input
-            type="range"
-            min="0"
-            max="45"
-            step="1"
-            value={isAutoScroll ? autoSpeed : 0}
-            onChange={(event) => {
-              const nextSpeed = Number(event.target.value);
-
-              if (nextSpeed <= 0) {
-                setIsAutoScroll(false);
-                return;
-              }
-
-              setAutoSpeed(nextSpeed);
-              setIsAutoScroll(true);
-            }}
-            className="w-full accent-yellow-300"
-            aria-label="オート読書速度"
-          />
-
-          <div className="mt-2 flex justify-between text-xs font-bold text-gray-400">
-            <span>停止</span>
-            <span>ゆっくり</span>
-            <span>ふつう</span>
-            <span>速い</span>
+          <div className="border-t border-gray-100 px-7 py-4 text-right text-sm text-gray-500">
+            ← 次へ ／ → 前へ ／ A = オート ／ S = 共有 ／ R = 一人読み
           </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div className="border-t border-gray-100 px-7 py-4 text-right text-sm text-gray-500">
-    ← 次へ ／ → 前へ ／ A = オート ／ S = 共有 ／ R = 一人読み
-  </div>
-</header>
+        </header>
 
         <div
           className={`grid gap-6 ${
@@ -1153,7 +1545,7 @@ export default function Home() {
         >
           <section className="overflow-hidden rounded-3xl bg-[#fffdf8] shadow-xl">
             <div className="border-b border-gray-100 px-5 py-4">
-                            <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm font-bold text-gray-700">
                     {readerMode === "reading"
@@ -1168,14 +1560,12 @@ export default function Home() {
               </div>
             </div>
 
-            
-
             <div
               ref={readingAreaRef}
               onScroll={updateActiveUnitByCenter}
               className="relative h-[75vh] overflow-x-auto overflow-y-hidden px-8 py-8"
             >
-                            <div
+              <div
                 className={`h-full font-serif text-[1.3rem] text-gray-900 ${
                   layoutMode === "normal"
                     ? "leading-[2.1] tracking-[0.03em]"
@@ -1195,7 +1585,8 @@ export default function Home() {
 
                   const readersInParagraph = admittedParticipants.filter(
                     (participant) => {
-                      const readerUnit = readingUnits[participant.paragraphIndex];
+                      const readerUnit =
+                        readingUnits[participant.paragraphIndex];
                       return readerUnit?.paragraphIndex === index;
                     },
                   );
@@ -1263,7 +1654,6 @@ export default function Home() {
                                 ))}
                               </div>
                             )}
-
                         </>
                       ) : (
                         <div
@@ -1275,9 +1665,11 @@ export default function Home() {
                               currentParagraphIndex === unit.unitIndex;
 
                             const readersHere = admittedParticipants.filter(
-  (participant) =>
-    Math.abs(participant.paragraphIndex - unit.unitIndex) <= 1,
-);
+                              (participant) =>
+                                Math.abs(
+                                  participant.paragraphIndex - unit.unitIndex,
+                                ) <= 1,
+                            );
 
                             return (
                               <div
@@ -1303,23 +1695,23 @@ export default function Home() {
                                   }}
                                 />
 
-                                {readerMode === "shared" && readersHere.length > 0 && (
-                                  <div className="reader-follow-badges">
-                                    {readersHere.map((reader) => (
-                                      <span
-                                        key={reader.id}
-                                        className={`reader-follow-badge ${
-                                          reader.id === participantId ? "is-me" : ""
-                                        }`}
-                                      >
-                                        {getDisplayName(reader.name)}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-
-                              
-                                  
+                                {readerMode === "shared" &&
+                                  readersHere.length > 0 && (
+                                    <div className="reader-follow-badges">
+                                      {readersHere.map((reader) => (
+                                        <span
+                                          key={reader.id}
+                                          className={`reader-follow-badge ${
+                                            reader.id === participantId
+                                              ? "is-me"
+                                              : ""
+                                          }`}
+                                        >
+                                          {getDisplayName(reader.name)}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
                               </div>
                             );
                           })}
