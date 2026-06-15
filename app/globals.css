@@ -77,12 +77,15 @@ rt {
   gap: 1.4em;
   height: 100%;
   padding: 0.6em 0.9em;
-  border-right: 1px solid rgba(120, 90, 40, 0.22);
-  border-radius: 1.2rem;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  border-radius: 0;
+  background: transparent;
 }
 
 .paragraph-cluster.is-active {
-  background: rgba(254, 240, 138, 0.18);
+  background: transparent !important;
 }
 
 .two-sentence-layout {
@@ -95,14 +98,48 @@ rt {
   width: max-content;
 }
 
+/* 騾壼ｸｸ谿ｵ關ｽ繝｢繝ｼ繝峨→2譁�げ繝ｫ繝ｼ繝励Δ繝ｼ繝峨〒蜷後§繝槭�繧ｫ繝ｼ濶ｲ繧剃ｽｿ縺� */
+.normal-reading-unit,
+.reading-unit {
+  position: relative;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.normal-reading-unit.is-active,
+.reading-unit.is-active {
+  background: rgba(254, 240, 138, 0.38) !important;
+  border-radius: 1rem;
+}
+
+/* 蜈ｱ騾壹�鮟�牡縺�ｸｦ繝槭�繧ｫ繝ｼ */
+.normal-reading-unit.is-active::after,
+.reading-unit.is-active::after {
+  content: "";
+  position: absolute;
+  top: 0.35rem;
+  right: 0.08rem;
+  bottom: 0.35rem;
+  width: 4px;
+  border-radius: 999px;
+  background: rgba(250, 204, 21, 0.95);
+  pointer-events: none;
+}
+
+/* 蜿､縺� before 繝槭�繧ｫ繝ｼ縺ｯ菴ｿ繧上↑縺� */
+.normal-reading-unit.is-active::before,
+.reading-unit.is-active::before {
+  content: none !important;
+}
+
 .reading-unit {
   writing-mode: vertical-rl !important;
   text-orientation: mixed;
-  position: relative;
   display: block;
   box-sizing: border-box;
   min-width: 3em;
-  padding: 2.3rem 0.35em 0.4em 0.35em;
+  padding: 2.3rem 0.55em 0.7em 0.55em;
   margin: 0;
   font: inherit;
   line-height: 2.35;
@@ -111,23 +148,12 @@ rt {
   cursor: pointer;
   overflow: visible;
   border-radius: 1rem;
+  background: transparent;
 }
 
 .reading-unit:focus {
   outline: none;
-}
-
-.reading-unit.is-active::before {
-  content: "";
-  position: absolute;
-  top: 2rem;
-  right: -0.25em;
-  bottom: -0.25em;
-  left: -0.25em;
-  background: rgba(250, 240, 170, 0.22);
-  border-right: 4px solid rgba(250, 204, 21, 0.95);
-  border-radius: 0.8rem;
-  z-index: -1;
+  box-shadow: none;
 }
 
 .reading-unit-inner {
@@ -143,9 +169,8 @@ rt {
   color: #111827;
 }
 
-.reading-heading-unit.is-active::before {
-  background: rgba(229, 231, 235, 0.35);
-  border-right: 4px solid rgba(156, 163, 175, 0.9);
+.reading-heading-unit.is-active {
+  background: rgba(254, 240, 138, 0.38) !important;
 }
 
 .normal-paragraph {
@@ -156,7 +181,7 @@ rt {
 
 .reader-follow-badges {
   position: absolute;
-  top: 5em;
+  top: -2rem !important;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -171,7 +196,7 @@ rt {
 }
 
 .normal-reader-follow-badges {
-  top: 0.15rem;
+  top: 0.15rem !important;
   left: 50%;
 }
 
@@ -203,7 +228,6 @@ rt {
   border-color: rgba(252, 211, 77, 0.95);
 }
 
-/* 蜿､縺�悽譁��繝舌ャ繧ｸ繧�崋螳壹ヰ繝ｼ縺ｯ螳悟�縺ｫ豸医☆縲ゅ◆縺�縺� reader-follow-* 縺ｯ豸医＆縺ｪ縺�� */
 .reader-labels,
 .reader-label,
 .reader-labels-horizontal,
@@ -219,6 +243,43 @@ rt {
 .reader-status-position {
   display: none !important;
 }
-.reader-follow-badges {
-  top: -2rem !important;
+
+
+/* 讓ｪ譖ｸ縺咲ｸｦ繧ｹ繧ｯ繝ｭ繝ｼ繝ｫ繝｢繝ｼ繝� */
+.horizontal-reading-content {
+  width: 100%;
+  min-height: 100%;
+  writing-mode: horizontal-tb !important;
+  text-orientation: mixed !important;
+}
+
+.horizontal-reading-unit {
+  position: relative;
+  max-width: 42rem;
+  margin-left: auto;
+  margin-right: auto;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.horizontal-reading-unit.is-active {
+  background: rgba(254, 240, 138, 0.38) !important;
+  border-radius: 1rem;
+}
+
+.horizontal-reading-unit.is-active::after {
+  content: "";
+  position: absolute;
+  top: 0.35rem;
+  left: 0.25rem;
+  bottom: 0.35rem;
+  width: 4px;
+  border-radius: 999px;
+  background: rgba(250, 204, 21, 0.95);
+  pointer-events: none;
+}
+
+.horizontal-reading-unit.is-active::before {
+  content: none !important;
 }

@@ -41,7 +41,7 @@ type Reaction = {
 };
 
 type ReaderMode = "reading" | "shared";
-type LayoutMode = "normal" | "grouped";
+type LayoutMode = "normal" | "grouped" | "horizontal";
 type AutoSpeedMode = "slow" | "normal" | "fast";
 
 type Paragraph = {
@@ -64,15 +64,15 @@ type ReadingProgress = {
   layoutMode: LayoutMode;
   currentParagraphIndex: number;
   scrollLeft: number;
+  scrollTop?: number;
+  readingUnitsLength: number;
   savedAt: number;
-  readingUnitsLength?: number;
-  percent?: number;
 };
 
 type StoryProgressSummary = {
   percent: number;
-  layoutMode: LayoutMode;
   savedAt: number;
+  layoutMode: LayoutMode;
 };
 
 type LastReadingState = {
@@ -86,15 +86,22 @@ const ACTIVE_LIMIT_MS = 5 * 60 * 1000;
 
 const PARTICIPANT_ID_KEY = "sharedReadingParticipantId_v10";
 const PARTICIPANT_JOINED_AT_KEY = "sharedReadingParticipantJoinedAt_v10";
-const READING_PROGRESS_KEY_PREFIX = "sharedReadingProgress_v1";
-const LAST_READING_STATE_KEY = "sharedReadingLastState_v1";
+
+// v4にして、過去に残った7%・3%などの古い保存データは読まない。
+const READING_PROGRESS_KEY_PREFIX = "sharedReadingProgress_v4";
+const LAST_READING_STATE_KEY = "sharedReadingLastState_v4";
+
+function isStoryKey(value: unknown): value is StoryKey {
+  return typeof value === "string" && value in stories;
+}
 
 function getReadingProgressKey(storyKey: StoryKey, layoutMode: LayoutMode) {
   return `${READING_PROGRESS_KEY_PREFIX}_${storyKey}_${layoutMode}`;
 }
 
-function isStoryKey(value: unknown): value is StoryKey {
-  return typeof value === "string" && value in stories;
+function getDisplayPercent(index: number, count: number) {
+  if (count <= 1) return 0;
+  return Math.round((index / (count - 1)) * 100);
 }
 
 function saveLastReadingState(storyKey: StoryKey, layoutMode: LayoutMode) {
@@ -108,15 +115,20 @@ function saveLastReadingState(storyKey: StoryKey, layoutMode: LayoutMode) {
 }
 
 function loadLastReadingState() {
-  const rawState = localStorage.getItem(LAST_READING_STATE_KEY);
+  if (typeof window === "undefined") return null;
 
+  const rawState = localStorage.getItem(LAST_READING_STATE_KEY);
   if (!rawState) return null;
 
   try {
     const state = JSON.parse(rawState) as LastReadingState;
 
     if (!isStoryKey(state.storyKey)) return null;
-    if (state.layoutMode !== "normal" && state.layoutMode !== "grouped") {
+    if (
+      state.layoutMode !== "normal" &&
+      state.layoutMode !== "grouped" &&
+      state.layoutMode !== "horizontal"
+    ) {
       return null;
     }
 
@@ -127,54 +139,94 @@ function loadLastReadingState() {
   }
 }
 
+function writeReadingProgress(
+  storyKey: StoryKey,
+  layoutMode: LayoutMode,
+  currentParagraphIndex: number,
+  readingUnitsLength: number,
+  scrollLeft: number,
+  scrollTop = 0,
+) {
+  if (typeof window === "undefined") return;
+  if (readingUnitsLength <= 0) return;
+
+  const safeIndex = Math.max(
+    0,
+    Math.min(currentParagraphIndex, readingUnitsLength - 1),
+  );
+
+  const progress: ReadingProgress = {
+    storyKey,
+    layoutMode,
+    currentParagraphIndex: safeIndex,
+    scrollLeft,
+    scrollTop,
+    readingUnitsLength,
+    savedAt: Date.now(),
+  };
+
+  localStorage.setItem(
+    getReadingProgressKey(storyKey, layoutMode),
+    JSON.stringify(progress),
+  );
+
+  saveLastReadingState(storyKey, layoutMode);
+}
+
+function loadReadingProgressFromStorage(
+  storyKey: StoryKey,
+  layoutMode: LayoutMode,
+) {
+  if (typeof window === "undefined") return null;
+
+  const rawProgress = localStorage.getItem(
+    getReadingProgressKey(storyKey, layoutMode),
+  );
+
+  if (!rawProgress) return null;
+
+  try {
+    const progress = JSON.parse(rawProgress) as ReadingProgress;
+
+    if (progress.storyKey !== storyKey) return null;
+    if (progress.layoutMode !== layoutMode) return null;
+    if (typeof progress.currentParagraphIndex !== "number") return null;
+
+    return progress;
+  } catch (error) {
+    console.error("読書位置の読み込み失敗", error);
+    return null;
+  }
+}
+
 function loadProgressSummaryForStory(storyKey: StoryKey) {
   if (typeof window === "undefined") return null;
 
-  const progressCandidates = (["normal", "grouped"] as LayoutMode[])
-    .map((targetLayoutMode) => {
-      const rawProgress = localStorage.getItem(
-        getReadingProgressKey(storyKey, targetLayoutMode),
+  const summaries = (["normal", "grouped", "horizontal"] as LayoutMode[])
+    .map((mode) => {
+      const progress = loadReadingProgressFromStorage(storyKey, mode);
+      if (!progress) return null;
+
+      const length = Math.max(1, Number(progress.readingUnitsLength || 1));
+      const safeIndex = Math.max(
+        0,
+        Math.min(Number(progress.currentParagraphIndex || 0), length - 1),
       );
+      const percent = getDisplayPercent(safeIndex, length);
 
-      if (!rawProgress) return null;
+      // 先頭は未読扱い。3%や7%のような古い初期表示はv4では読まない。
+      if (safeIndex <= 0 || percent <= 0) return null;
 
-      try {
-        const progress = JSON.parse(rawProgress) as ReadingProgress;
-
-        if (progress.storyKey !== storyKey) return null;
-        if (
-          progress.layoutMode !== "normal" &&
-          progress.layoutMode !== "grouped"
-        ) {
-          return null;
-        }
-
-        const percent =
-          typeof progress.percent === "number"
-            ? progress.percent
-            : typeof progress.readingUnitsLength === "number"
-              ? getPercent(
-                  progress.currentParagraphIndex,
-                  progress.readingUnitsLength,
-                )
-              : null;
-
-        if (percent === null) return null;
-
-        return {
-          percent: Math.max(0, Math.min(100, percent)),
-          layoutMode: progress.layoutMode,
-          savedAt: progress.savedAt,
-        } satisfies StoryProgressSummary;
-      } catch (error) {
-        console.error("作品別進捗の読み込み失敗", error);
-        return null;
-      }
+      return {
+        percent,
+        savedAt: Number(progress.savedAt || 0),
+        layoutMode: mode,
+      } satisfies StoryProgressSummary;
     })
-    .filter((progress): progress is StoryProgressSummary => progress !== null)
+    .filter((item): item is StoryProgressSummary => item !== null)
     .sort((a, b) => b.savedAt - a.savedAt);
 
-  return progressCandidates[0] ?? null;
+  return summaries[0] ?? null;
 }
 
 function loadAllStoryProgressSummaries() {
@@ -195,38 +247,6 @@ function loadAllStoryProgressSummaries() {
     },
     {} as Partial<Record<StoryKey, StoryProgressSummary>>,
   );
-}
-
-function writeReadingProgress(
-  storyKey: StoryKey,
-  layoutMode: LayoutMode,
-  currentParagraphIndex: number,
-  readingUnitsLength: number,
-  scrollLeft: number,
-) {
-  if (readingUnitsLength <= 0) return;
-
-  const safeIndex = Math.max(
-    0,
-    Math.min(currentParagraphIndex, readingUnitsLength - 1),
-  );
-
-  const progress: ReadingProgress = {
-    storyKey,
-    layoutMode,
-    currentParagraphIndex: safeIndex,
-    scrollLeft,
-    savedAt: Date.now(),
-    readingUnitsLength,
-    percent: getPercent(safeIndex, readingUnitsLength),
-  };
-
-  localStorage.setItem(
-    getReadingProgressKey(progress.storyKey, progress.layoutMode),
-    JSON.stringify(progress),
-  );
-
-  saveLastReadingState(storyKey, layoutMode);
 }
 
 function createParticipantId() {
@@ -328,15 +348,15 @@ function normalizeScannedJapaneseText(text: string) {
       .replace(/[ \t]+/g, " ")
 
       // OCRでよく入る「文 字 の 間 の 空 白」を削除
-      .replace(/([ぁ-んァ-ヶ一-龠々ー])\s+(?=[ぁ-んァ-ヶ一-龠々ー])/g, "$1")
+      .replace(/([ぁ-んァ-ヶ一-龠々ー])[ \t]+(?=[ぁ-んァ-ヶ一-龠々ー])/g, "$1")
 
       // 句読点・カッコ周りの空白を整理
       .replace(/\s+([、。！？!?）」』】）])/g, "$1")
       .replace(/([「『【（])\s+/g, "$1")
 
       // 英数字も、OCRで1文字ずつ空いたものだけ軽く戻す
-      .replace(/([A-Za-z])\s+(?=[A-Za-z])/g, "$1")
-      .replace(/([0-9])\s+(?=[0-9])/g, "$1")
+      .replace(/([A-Za-z])[ \t]+(?=[A-Za-z])/g, "$1")
+      .replace(/([0-9])[ \t]+(?=[0-9])/g, "$1")
   );
 }
 
@@ -350,8 +370,54 @@ function normalizeForCompare(text: string) {
     .trim();
 }
 
+const HEADING_MAX_LENGTH = 30;
+const HEADING_EXCLUDED_MARKS = /[、。！？!?「」『』【】（）()]/;
+const SENTENCE_END_MARKS = /[。！？!?」』】）)]$/;
+const KANJI_NUMERAL_PATTERN = /^[一二三四五六七八九十百千]+$/;
+
+function normalizeHeadingText(line: string) {
+  const trimmedLine = line.trim();
+
+  // 数字のみ、または「一」「二」などの漢数字のみの行は章番号・節番号として扱う。
+  if (/^\d+$/.test(trimmedLine) || KANJI_NUMERAL_PATTERN.test(trimmedLine)) {
+    return trimmedLine;
+  }
+
+  // 「5武藤澄香」「5 武藤澄香」のような行は、表示上だけ数字と文字を分ける。
+  const numberedHeading = trimmedLine.match(/^(\d+)\s*(\S(?:.*\S)?)$/);
+  if (numberedHeading) {
+    const headingBody = numberedHeading[2].replace(/\s+/g, "");
+    return `${numberedHeading[1]} ${headingBody}`;
+  }
+
+  return trimmedLine.replace(/\s+/g, " ");
+}
+
 function isChapterHeading(line: string) {
-  return /^\d+\s*[^、。！？!?「」『』【】（）()]{1,20}$/.test(line);
+  const trimmedLine = line.trim();
+  if (!trimmedLine) return false;
+
+  // 句読点や括弧を含む行は本文の可能性が高いため、子見出しにしない。
+  if (HEADING_EXCLUDED_MARKS.test(trimmedLine)) return false;
+
+  // 1, 2, 15 のような数字のみ。
+  if (/^\d+$/.test(trimmedLine)) return true;
+
+  // 一、二、三などの青空文庫の章番号。
+  if (KANJI_NUMERAL_PATTERN.test(trimmedLine)) return true;
+
+  // 5武藤澄香 / 5 武藤澄香 / 12 函館未来 など。
+  if (/^\d+\s*\S/.test(trimmedLine)) {
+    const headingBody = trimmedLine.replace(/^\d+\s*/, "").replace(/\s+/g, "");
+    return headingBody.length > 0 && headingBody.length <= HEADING_MAX_LENGTH;
+  }
+
+  // 第1章 / 第5話 / 第10節 / 第2編 など。
+  if (/^第[0-9０-９一二三四五六七八九十百千]+[章話節編部]$/.test(trimmedLine)) {
+    return true;
+  }
+
+  return false;
 }
 
 function decorateText(text: string) {
@@ -359,25 +425,37 @@ function decorateText(text: string) {
   return highlightDictionaryWords(rubyConverted);
 }
 
+function stripAozoraNotes(line: string) {
+  // ［＃〜］は字下げ・傍点・外字説明などの入力者注なので、本文表示からは外す。
+  return line.replace(/［＃.*?］/g, "");
+}
+
+function removeAozoraGuideBlock(text: string) {
+  // 青空文庫冒頭の「テキスト中に現れる記号について」の説明ブロックを除去する。
+  return text.replace(/-{5,}[\s\S]*?-{5,}/g, "\n");
+}
+
 function cleanAozoraText(
   text: string,
   title: string,
   author: string,
 ): Paragraph[] {
-  const normalizedText = normalizeScannedJapaneseText(text).replace(
-    /［＃.*?］/g,
-    "",
-  );
+  const unifiedText = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
-  const beforeBibliography = normalizedText.split("底本：")[0];
+  // 「底本：」以降は青空文庫の書誌情報なので、読書本文には使わない。
+  const beforeBibliography = unifiedText.split("底本：")[0];
+
+  const withoutGuideBlock = removeAozoraGuideBlock(beforeBibliography);
+
+  // txtの1行目はタイトル、2行目は著者として扱い、本文には絶対に表示しない。
+  // 3行目以降だけを本文処理の対象にする。
+  const bodyLines = withoutGuideBlock.split("\n").slice(2);
 
   const titleKey = normalizeForCompare(title);
   const authorKey = normalizeForCompare(author);
 
-  const rawLines = beforeBibliography
-    .replace(/-{5,}[\s\S]*?-{5,}/g, "")
-    .split("\n")
-    .map((line) => line.trim())
+  const rawLines = bodyLines
+    .map((line) => normalizeScannedJapaneseText(stripAozoraNotes(line)).trim())
     .filter(Boolean);
 
   const paragraphs: Paragraph[] = [];
@@ -387,29 +465,25 @@ function cleanAozoraText(
     const trimmed = buffer.trim();
     if (!trimmed) return;
 
+    // Paragraph.text はHTML化しない。文分割が壊れないように、生テキストのまま持つ。
     paragraphs.push({
-      text: decorateText(trimmed),
+      text: trimmed,
     });
 
     buffer = "";
   };
 
-  const shouldRemoveTitleOrAuthor = (line: string, index: number) => {
+  const shouldRemoveDuplicatedTitleOrAuthor = (line: string, index: number) => {
     const key = normalizeForCompare(line);
 
     if (!key) return true;
-
-    // 子見出しは必ず残す。
-    // 例:「5武藤澄香」「5 武藤澄香」
     if (isChapterHeading(line)) return false;
 
-    // タイトル・著者は本文から除外する。
-    // 完全一致はどこにあっても除外する。
+    // 1・2行目はすでに削除しているが、青空文庫などで本文側に再出現する場合だけ除外する。
     if (titleKey && key === titleKey) return true;
     if (authorKey && key === authorKey) return true;
 
     // 先頭付近だけ、タイトル＋著者がくっついた行も除外する。
-    // 例:「吾輩は猫である夏目漱石」
     if (index <= 8) {
       const titleAndAuthor = `${titleKey}${authorKey}`;
       const authorAndTitle = `${authorKey}${titleKey}`;
@@ -432,7 +506,7 @@ function cleanAozoraText(
   };
 
   rawLines.forEach((originalLine, index) => {
-    if (shouldRemoveTitleOrAuthor(originalLine, index)) return;
+    if (shouldRemoveDuplicatedTitleOrAuthor(originalLine, index)) return;
 
     let line = originalLine;
 
@@ -442,19 +516,18 @@ function cleanAozoraText(
       → 見出し「5 武藤澄香」と本文「「なんか...」」に分ける。
     */
     const headingWithBody = line.match(
-      /^(\d+)\s*([^、。！？!?「」『』【】（）()\d]{1,20})(?=「|『)/,
+      /^(\d+)\s*([^、。！？!?「」『』【】（）()\d]{1,30})(?=「|『)/,
     );
 
     if (headingWithBody) {
       flushBuffer();
 
-      const headingText = `${headingWithBody[1]} ${headingWithBody[2].replace(
-        /\s+/g,
-        "",
-      )}`;
+      const headingText = normalizeHeadingText(
+        `${headingWithBody[1]} ${headingWithBody[2]}`,
+      );
 
       paragraphs.push({
-        text: decorateText(headingText),
+        text: headingText,
         isHeading: true,
       });
 
@@ -466,13 +539,8 @@ function cleanAozoraText(
     if (isChapterHeading(line)) {
       flushBuffer();
 
-      const headingMatch = line.match(/^(\d+)\s*(.+)$/);
-      const headingText = headingMatch
-        ? `${headingMatch[1]} ${headingMatch[2].replace(/\s+/g, "")}`
-        : line.replace(/\s+/g, "");
-
       paragraphs.push({
-        text: decorateText(headingText),
+        text: normalizeHeadingText(line),
         isHeading: true,
       });
 
@@ -481,8 +549,8 @@ function cleanAozoraText(
 
     buffer += line;
 
-    // スキャン由来の途中改行は無視して、文末まで結合する。
-    if (/[。！？!?）」』】）]$/.test(line)) {
+    // OCR由来の途中改行は無視し、文末らしい記号で終わったら段落として確定する。
+    if (SENTENCE_END_MARKS.test(line)) {
       flushBuffer();
     }
   });
@@ -492,11 +560,56 @@ function cleanAozoraText(
   return paragraphs;
 }
 
-function splitIntoSentences(htmlText: string) {
-  return htmlText
-    .split(/(?<=。)/)
-    .map((text) => text.trim())
-    .filter(Boolean);
+const SENTENCE_TERMINATOR_CHARS = new Set(["。", "！", "？", "!", "?"]);
+const SENTENCE_CLOSING_MARKS = new Set(["」", "』", "】", "）", ")"]);
+
+function splitIntoSentences(rawText: string) {
+  const trimmedText = rawText.trim();
+
+  if (!trimmedText) return [];
+
+  const sentences: string[] = [];
+  let buffer = "";
+
+  const pushSentence = () => {
+    const sentence = buffer.trim();
+
+    if (sentence) {
+      sentences.push(sentence);
+    }
+
+    buffer = "";
+  };
+
+  for (let index = 0; index < trimmedText.length; index += 1) {
+    const char = trimmedText[index];
+    buffer += char;
+
+    if (SENTENCE_TERMINATOR_CHARS.has(char)) {
+      // 文末記号の直後に閉じ括弧が続く場合は、同じ文に含める。
+      while (
+        index + 1 < trimmedText.length &&
+        SENTENCE_CLOSING_MARKS.has(trimmedText[index + 1])
+      ) {
+        index += 1;
+        buffer += trimmedText[index];
+      }
+
+      pushSentence();
+      continue;
+    }
+
+    // 「おはよう」 のように句点なしで閉じ括弧で終わる会話文も1文として扱う。
+    if (SENTENCE_CLOSING_MARKS.has(char)) {
+      pushSentence();
+    }
+  }
+
+  if (buffer.trim()) {
+    pushSentence();
+  }
+
+  return sentences;
 }
 
 function buildReadingUnits(paragraphs: Paragraph[]) {
@@ -572,7 +685,6 @@ export default function Home() {
 
   const [isAutoScroll, setIsAutoScroll] = useState(false);
   const [autoSpeed, setAutoSpeed] = useState(17);
-
   const [readingProgressNotice, setReadingProgressNotice] = useState("");
   const [storyProgressSummaries, setStoryProgressSummaries] = useState<
     Partial<Record<StoryKey, StoryProgressSummary>>
@@ -581,7 +693,11 @@ export default function Home() {
   // オート時はマーカーを飛ばさず、読書面を少しずつ横へ流す。
   // 数字を大きくすると速くなる。
   const AUTO_SCROLL_SPEED =
-    layoutMode === "grouped" ? autoSpeed * 1.7 : autoSpeed;
+    layoutMode === "grouped"
+      ? autoSpeed * 1.7
+      : layoutMode === "horizontal"
+        ? autoSpeed * 2.2
+        : autoSpeed;
 
   const paragraphRefs = useRef<(HTMLDivElement | null)[]>([]);
   const currentParagraphIndexRef = useRef(0);
@@ -592,10 +708,18 @@ export default function Home() {
   const didLoadLastReadingStateRef = useRef(false);
   const isRestoringProgressRef = useRef(false);
   const textLoadRequestIdRef = useRef(0);
+  const progressNoticeTimerRef = useRef<number | null>(null);
   const readingAreaRef = useRef<HTMLDivElement | null>(null);
   const isProgrammaticScrollRef = useRef(false);
   const scrollFrameRef = useRef<number | null>(null);
-  const progressNoticeTimerRef = useRef<number | null>(null);
+
+  // モード切替時は、読書単位番号ではなく「段落番号」を基準に位置を引き継ぐ。
+  // 通常段落・2文グループ・横書きでは読書単位の見え方が違うため、
+  // unitIndexをそのまま使うと別の場所へ飛ぶことがある。
+  const layoutSwitchTargetRef = useRef<{
+    targetMode: LayoutMode;
+    paragraphIndex: number;
+  } | null>(null);
 
   const readingUnits = useMemo(() => {
     return buildReadingUnits(paragraphs);
@@ -657,6 +781,59 @@ export default function Home() {
     });
   };
 
+  const getFirstUnitIndexInParagraph = (paragraphIndex: number) => {
+    if (readingUnits.length <= 0) return 0;
+
+    const safeParagraphIndex = Math.max(
+      0,
+      Math.min(paragraphIndex, paragraphs.length - 1),
+    );
+
+    const firstUnit =
+      readingUnitsByParagraph.get(safeParagraphIndex)?.[0] ?? readingUnits[0];
+
+    return Math.max(0, Math.min(firstUnit.unitIndex, readingUnits.length - 1));
+  };
+
+  const changeLayoutModeKeepingPosition = (nextMode: LayoutMode) => {
+    if (nextMode === layoutModeRef.current) return;
+
+    setIsAutoScroll(false);
+
+    const currentUnit = readingUnits[currentParagraphIndexRef.current];
+    const currentParagraphIndex =
+      currentUnit?.paragraphIndex ?? activeParagraphIndex ?? 0;
+
+    layoutSwitchTargetRef.current = {
+      targetMode: nextMode,
+      paragraphIndex: currentParagraphIndex,
+    };
+
+    const targetIndex = getFirstUnitIndexInParagraph(currentParagraphIndex);
+
+    isRestoringProgressRef.current = true;
+    isProgrammaticScrollRef.current = true;
+
+    setCurrentParagraphIndex(targetIndex);
+    currentParagraphIndexRef.current = targetIndex;
+    updateLocalParticipant(targetIndex);
+
+    writeReadingProgress(
+      selectedStoryRef.current,
+      layoutModeRef.current,
+      currentParagraphIndexRef.current,
+      readingUnits.length,
+      readingAreaRef.current?.scrollLeft ?? 0,
+      readingAreaRef.current?.scrollTop ?? 0,
+    );
+
+    setLayoutMode(nextMode);
+  };
+
+  const refreshStoryProgressSummaries = () => {
+    setStoryProgressSummaries(loadAllStoryProgressSummaries());
+  };
+
   const showReadingProgressNotice = (message: string) => {
     setReadingProgressNotice(message);
 
@@ -666,70 +843,33 @@ export default function Home() {
 
     progressNoticeTimerRef.current = window.setTimeout(() => {
       setReadingProgressNotice("");
-    }, 2200);
-  };
-
-  const refreshStoryProgressSummaries = () => {
-    setStoryProgressSummaries(loadAllStoryProgressSummaries());
+    }, 1800);
   };
 
   const saveReadingProgress = (
-    nextIndex: number = currentParagraphIndexRef.current,
-    options: { showNotice?: boolean } = {},
+    nextIndex = currentParagraphIndexRef.current,
   ) => {
-    // 復元直後はブラウザの自動スクロールイベントが走ることがある。
-    // ここで保存すると、せっかくの前回位置が0%で上書きされるので止める。
     if (isRestoringProgressRef.current) return;
-
-    const readingArea = readingAreaRef.current;
+    if (readingUnits.length <= 0) return;
 
     writeReadingProgress(
       selectedStoryRef.current,
       layoutModeRef.current,
       nextIndex,
       readingUnits.length,
-      readingArea?.scrollLeft ?? 0,
+      readingAreaRef.current?.scrollLeft ?? 0,
+      readingAreaRef.current?.scrollTop ?? 0,
     );
 
     refreshStoryProgressSummaries();
-
-    if (options.showNotice) {
-      showReadingProgressNotice("自動保存しました");
-    }
-  };
-
-  const loadReadingProgress = (
-    storyKey: StoryKey,
-    targetLayoutMode: LayoutMode,
-  ) => {
-    const rawProgress = localStorage.getItem(
-      getReadingProgressKey(storyKey, targetLayoutMode),
-    );
-
-    if (!rawProgress) return null;
-
-    try {
-      const progress = JSON.parse(rawProgress) as ReadingProgress;
-
-      if (
-        progress.storyKey !== storyKey ||
-        progress.layoutMode !== targetLayoutMode
-      ) {
-        return null;
-      }
-
-      return progress;
-    } catch (error) {
-      console.error("読書位置の読み込み失敗", error);
-      return null;
-    }
+    showReadingProgressNotice("自動保存中");
   };
 
   const restoreReadingProgress = (
     progress: ReadingProgress,
-    targetLayoutMode: LayoutMode = layoutMode,
+    targetLayoutMode: LayoutMode,
   ) => {
-    if (readingUnits.length === 0) return;
+    if (readingUnits.length <= 0) return;
 
     isRestoringProgressRef.current = true;
 
@@ -742,31 +882,50 @@ export default function Home() {
     currentParagraphIndexRef.current = safeIndex;
     updateLocalParticipant(safeIndex);
 
+    // 本文位置だけでなく、作品一覧の％表示も復元直後に更新する。
+    // 横書きモードでは scrollTop、縦書きモードでは scrollLeft を使う。
+    writeReadingProgress(
+      selectedStoryRef.current,
+      targetLayoutMode,
+      safeIndex,
+      readingUnits.length,
+      progress.scrollLeft,
+    );
+    refreshStoryProgressSummaries();
+
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        const readingArea = readingAreaRef.current;
-
-        if (!readingArea) {
-          isRestoringProgressRef.current = false;
-          return;
-        }
-
-        // まず保存インデックスに合わせる。
-        // scrollLeft が環境差で合わない時も、ここで最低限その区切りへ戻せる。
         scrollToFocus(safeIndex, targetLayoutMode);
 
         window.setTimeout(() => {
-          if (progress.scrollLeft > 0) {
-            readingArea.scrollLeft = progress.scrollLeft;
+          if (readingAreaRef.current && targetLayoutMode === "horizontal") {
+            readingAreaRef.current.scrollTop = progress.scrollTop ?? 0;
+          } else if (readingAreaRef.current && progress.scrollLeft > 0) {
+            readingAreaRef.current.scrollLeft = progress.scrollLeft;
           }
+
+          refreshStoryProgressSummaries();
 
           window.setTimeout(() => {
             isRestoringProgressRef.current = false;
-          }, 350);
+          }, 250);
         }, 80);
       });
     });
   };
+
+  useEffect(() => {
+    refreshStoryProgressSummaries();
+
+    const lastState = loadLastReadingState();
+
+    if (lastState) {
+      setSelectedStory(lastState.storyKey);
+      setLayoutMode(lastState.layoutMode);
+    }
+
+    didLoadLastReadingStateRef.current = true;
+  }, []);
 
   useEffect(() => {
     let savedId = localStorage.getItem(PARTICIPANT_ID_KEY);
@@ -786,25 +945,6 @@ export default function Home() {
     setParticipantId(savedId);
     setJoinedAt(savedJoinedAt);
   }, []);
-
-  useEffect(() => {
-    refreshStoryProgressSummaries();
-  }, []);
-
-  useEffect(() => {
-    const lastState = loadLastReadingState();
-
-    if (lastState) {
-      setSelectedStory(lastState.storyKey);
-      setLayoutMode(lastState.layoutMode);
-    }
-
-    didLoadLastReadingStateRef.current = true;
-  }, []);
-
-  // 前回読んだ作品・表示モードは、実際に読書位置を書き込む時だけ保存する。
-  // ここで selectedStory/layoutMode の変更だけを保存すると、
-  // 初回表示時に初期値の wagahai/normal で前回状態を上書きしてしまう。
 
   useEffect(() => {
     currentParagraphIndexRef.current = currentParagraphIndex;
@@ -832,7 +972,7 @@ export default function Home() {
     textLoadRequestIdRef.current = requestId;
 
     const loadText = async () => {
-      // 作品切り替え中の0%保存を防ぐ。
+      // 作品切り替え中の一瞬の0%保存を防ぐ。
       isRestoringProgressRef.current = true;
       setCurrentParagraphIndex(0);
       currentParagraphIndexRef.current = 0;
@@ -850,9 +990,6 @@ export default function Home() {
         const response = await fetch(story.textFile);
         const rawText = await response.text();
 
-        // 直前に別作品へ切り替わっていたら、古いfetch結果は捨てる。
-        // これがないと「吾輩」の読み込み結果が後から来て、
-        // インザメガチャーチの保存位置復元を邪魔することがある。
         if (textLoadRequestIdRef.current !== requestId) return;
 
         const cleanedParagraphs = cleanAozoraText(
@@ -877,28 +1014,72 @@ export default function Home() {
 
   useEffect(() => {
     if (readingUnits.length === 0) return;
+    if (!didLoadLastReadingStateRef.current) return;
 
-    const savedProgress = loadReadingProgress(selectedStory, layoutMode);
+    const switchTarget = layoutSwitchTargetRef.current;
+
+    if (switchTarget && switchTarget.targetMode === layoutMode) {
+      const targetIndex = getFirstUnitIndexInParagraph(
+        switchTarget.paragraphIndex,
+      );
+
+      layoutSwitchTargetRef.current = null;
+
+      isRestoringProgressRef.current = true;
+      isProgrammaticScrollRef.current = true;
+
+      setCurrentParagraphIndex(targetIndex);
+      currentParagraphIndexRef.current = targetIndex;
+      updateLocalParticipant(targetIndex);
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          scrollToFocus(targetIndex, layoutMode);
+
+          window.setTimeout(() => {
+            writeReadingProgress(
+              selectedStoryRef.current,
+              layoutMode,
+              targetIndex,
+              readingUnits.length,
+              readingAreaRef.current?.scrollLeft ?? 0,
+              readingAreaRef.current?.scrollTop ?? 0,
+            );
+
+            refreshStoryProgressSummaries();
+
+            isRestoringProgressRef.current = false;
+            isProgrammaticScrollRef.current = false;
+          }, layoutMode === "horizontal" ? 320 : 220);
+        });
+      });
+
+      return;
+    }
+
+    const savedProgress = loadReadingProgressFromStorage(
+      selectedStory,
+      layoutMode,
+    );
 
     if (savedProgress) {
       restoreReadingProgress(savedProgress, layoutMode);
-      writeReadingProgress(
-        selectedStory,
-        layoutMode,
-        savedProgress.currentParagraphIndex,
-        readingUnits.length,
-        savedProgress.scrollLeft,
-      );
-      refreshStoryProgressSummaries();
       return;
     }
 
     resetToBeginning(layoutMode);
+    refreshStoryProgressSummaries();
 
     window.setTimeout(() => {
       isRestoringProgressRef.current = false;
     }, 350);
-  }, [readingUnits.length, selectedStory, layoutMode]);
+  }, [
+    readingUnits.length,
+    selectedStory,
+    layoutMode,
+    paragraphs.length,
+    readingUnitsByParagraph,
+  ]);
 
   useEffect(() => {
     const q = query(collection(db, "participants"));
@@ -922,6 +1103,7 @@ export default function Home() {
         currentParagraphIndexRef.current,
         readingUnitsLengthRef.current,
         readingAreaRef.current?.scrollLeft ?? 0,
+        readingAreaRef.current?.scrollTop ?? 0,
       );
 
       if (!participantId) return;
@@ -1008,10 +1190,15 @@ export default function Home() {
   };
 
   const getFocusX = (mode: LayoutMode, areaRect: DOMRect) => {
-    // 通常段落は文頭を少し右寄りへ。
+    // 縦書き通常段落は文頭を少し右寄りへ。
     // 2文グループは画面中央へ。
-    const ratio = mode === "normal" ? 0.82 : 0.5;
+    const ratio = mode === "grouped" ? 0.5 : 0.82;
     return areaRect.left + areaRect.width * ratio;
+  };
+
+  const getFocusY = (areaRect: DOMRect) => {
+    // 横書き縦スクロールでは、画面中央より少し上を現在位置の基準にする。
+    return areaRect.top + areaRect.height * 0.42;
   };
 
   const scrollToFocus = (index: number, mode: LayoutMode = layoutMode) => {
@@ -1022,6 +1209,19 @@ export default function Home() {
 
     const targetRect = targetElement.getBoundingClientRect();
     const areaRect = readingArea.getBoundingClientRect();
+
+    if (mode === "horizontal") {
+      const targetTop =
+        targetElement.offsetTop - readingArea.clientHeight * 0.22;
+
+      readingArea.scrollTo({
+        top: Math.max(0, targetTop),
+        left: 0,
+        behavior: "auto",
+      });
+
+      return;
+    }
 
     const targetPoint =
       mode === "normal"
@@ -1049,7 +1249,6 @@ export default function Home() {
       if (!readingArea) return;
 
       const areaRect = readingArea.getBoundingClientRect();
-      const focusX = getFocusX(layoutMode, areaRect);
 
       let nearestIndex = currentParagraphIndexRef.current;
       let nearestDistance = Infinity;
@@ -1058,10 +1257,20 @@ export default function Home() {
         if (!element) return;
 
         const rect = element.getBoundingClientRect();
-        const targetPoint =
-          layoutMode === "normal" ? rect.right : rect.left + rect.width / 2;
 
-        const distance = Math.abs(targetPoint - focusX);
+        const targetPoint =
+          layoutMode === "horizontal"
+            ? rect.top
+            : layoutMode === "normal"
+              ? rect.right
+              : rect.left + rect.width / 2;
+
+        const focusPoint =
+          layoutMode === "horizontal"
+            ? getFocusY(areaRect)
+            : getFocusX(layoutMode, areaRect);
+
+        const distance = Math.abs(targetPoint - focusPoint);
 
         if (distance < nearestDistance) {
           nearestDistance = distance;
@@ -1098,12 +1307,14 @@ export default function Home() {
     isProgrammaticScrollRef.current = true;
 
     requestAnimationFrame(() => {
-      scrollToFocus(safeIndex, mode);
-      saveReadingProgress(safeIndex);
+      requestAnimationFrame(() => {
+        scrollToFocus(safeIndex, mode);
+        saveReadingProgress(safeIndex);
 
-      window.setTimeout(() => {
-        isProgrammaticScrollRef.current = false;
-      }, 120);
+        window.setTimeout(() => {
+          isProgrammaticScrollRef.current = false;
+        }, layoutModeRef.current === "horizontal" ? 300 : 120);
+      });
     });
 
     if (isAdmitted) {
@@ -1111,7 +1322,10 @@ export default function Home() {
     }
   };
 
-  const moveToNormalParagraph = (nextParagraphIndex: number) => {
+  const moveToNormalParagraph = (
+    nextParagraphIndex: number,
+    mode: LayoutMode = layoutMode,
+  ) => {
     const safeParagraphIndex = Math.max(
       0,
       Math.min(nextParagraphIndex, paragraphs.length - 1),
@@ -1121,7 +1335,7 @@ export default function Home() {
 
     if (!firstUnit) return;
 
-    moveToParagraph(firstUnit.unitIndex, "normal");
+    moveToParagraph(firstUnit.unitIndex, mode);
   };
 
   useEffect(() => {
@@ -1136,7 +1350,6 @@ export default function Home() {
 
     const updateReadingPositionForOthers = () => {
       const areaRect = readingArea.getBoundingClientRect();
-      const focusX = getFocusX(layoutMode, areaRect);
 
       let nearestIndex = currentParagraphIndexRef.current;
       let nearestDistance = Infinity;
@@ -1145,10 +1358,20 @@ export default function Home() {
         if (!element) return;
 
         const rect = element.getBoundingClientRect();
-        const targetPoint =
-          layoutMode === "normal" ? rect.right : rect.left + rect.width / 2;
 
-        const distance = Math.abs(targetPoint - focusX);
+        const targetPoint =
+          layoutMode === "horizontal"
+            ? rect.top
+            : layoutMode === "normal"
+              ? rect.right
+              : rect.left + rect.width / 2;
+
+        const focusPoint =
+          layoutMode === "horizontal"
+            ? getFocusY(areaRect)
+            : getFocusX(layoutMode, areaRect);
+
+        const distance = Math.abs(targetPoint - focusPoint);
 
         if (distance < nearestDistance) {
           nearestDistance = distance;
@@ -1172,12 +1395,28 @@ export default function Home() {
       const deltaTime = (now - lastTime) / 1000;
       lastTime = now;
 
-      virtualScrollLeft -= AUTO_SCROLL_SPEED * deltaTime;
-      readingArea.scrollLeft = virtualScrollLeft;
+      if (layoutMode === "horizontal") {
+        readingArea.scrollBy({
+          top: AUTO_SCROLL_SPEED * deltaTime,
+          left: 0,
+          behavior: "auto",
+        });
+      } else {
+        virtualScrollLeft -= AUTO_SCROLL_SPEED * deltaTime;
+        readingArea.scrollLeft = virtualScrollLeft;
+      }
 
       updateReadingPositionForOthers();
 
-      if (virtualScrollLeft <= 0) {
+      if (layoutMode !== "horizontal" && virtualScrollLeft <= 0) {
+        setIsAutoScroll(false);
+        return;
+      }
+
+      if (
+        layoutMode === "horizontal" &&
+        readingArea.scrollTop + readingArea.clientHeight >= readingArea.scrollHeight - 2
+      ) {
         setIsAutoScroll(false);
         return;
       }
@@ -1271,9 +1510,11 @@ export default function Home() {
       event.preventDefault();
 
       if (layoutMode === "normal") {
-        moveToNormalParagraph(activeParagraphIndex + 1);
+        moveToNormalParagraph(activeParagraphIndex + 1, layoutMode);
+      } else if (layoutMode === "horizontal") {
+        moveToNormalParagraph(activeParagraphIndex + 1, "horizontal");
       } else {
-        moveToParagraph(currentParagraphIndexRef.current + 1);
+        moveToParagraph(currentParagraphIndexRef.current + 1, layoutMode);
       }
     }
 
@@ -1281,10 +1522,22 @@ export default function Home() {
       event.preventDefault();
 
       if (layoutMode === "normal") {
-        moveToNormalParagraph(activeParagraphIndex - 1);
+        moveToNormalParagraph(activeParagraphIndex - 1, layoutMode);
+      } else if (layoutMode === "horizontal") {
+        moveToNormalParagraph(activeParagraphIndex - 1, "horizontal");
       } else {
-        moveToParagraph(currentParagraphIndexRef.current - 1);
+        moveToParagraph(currentParagraphIndexRef.current - 1, layoutMode);
       }
+    }
+
+    if (key === "arrowdown" && layoutMode === "horizontal") {
+      event.preventDefault();
+      moveToNormalParagraph(activeParagraphIndex + 1, "horizontal");
+    }
+
+    if (key === "arrowup" && layoutMode === "horizontal") {
+      event.preventDefault();
+      moveToNormalParagraph(activeParagraphIndex - 1, "horizontal");
     }
 
     if (key === "s") {
@@ -1387,9 +1640,9 @@ export default function Home() {
                 >
                   {Object.entries(stories).map(([key, story]) => {
                     const storyKey = key as StoryKey;
-                    const progressSummary = storyProgressSummaries[storyKey];
-                    const progressLabel = progressSummary
-                      ? `（${progressSummary.percent}%）`
+                    const progress = storyProgressSummaries[storyKey];
+                    const progressLabel = progress
+                      ? `（${progress.percent}%）`
                       : "（未読）";
 
                     return (
@@ -1402,20 +1655,20 @@ export default function Home() {
 
                 <div className="rounded-2xl bg-white px-4 py-3 text-xs font-bold text-gray-500 shadow-sm">
                   {storyProgressSummaries[selectedStory] ? (
-                    <span>
-                      前回の読書位置：
+                    <>
+                      前回の進捗：
                       <span className="text-[#b98234]">
                         {storyProgressSummaries[selectedStory]?.percent}%
                       </span>
                       <span className="ml-2 text-gray-400">
-                        {storyProgressSummaries[selectedStory]?.layoutMode ===
-                        "grouped"
-                          ? "2文グループ"
-                          : "通常段落"}
+                        {readingProgressNotice || "自動保存中"}
                       </span>
-                    </span>
+                    </>
                   ) : (
-                    <span>この作品はまだ読書位置がありません</span>
+                    <>
+                      未読{" "}
+                      <span className="ml-2 text-gray-400">自動保存中</span>
+                    </>
                   )}
                 </div>
 
@@ -1445,13 +1698,11 @@ export default function Home() {
                   </button>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2 rounded-2xl bg-gray-100 p-1">
+                <div className="grid grid-cols-3 gap-2 rounded-2xl bg-gray-100 p-1">
                   <button
                     type="button"
                     onClick={() => {
-                      setIsAutoScroll(false);
-                      setLayoutMode("normal");
-                      resetToBeginning("normal");
+                      changeLayoutModeKeepingPosition("normal");
                     }}
                     className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
                       layoutMode === "normal"
@@ -1465,9 +1716,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => {
-                      setIsAutoScroll(false);
-                      setLayoutMode("grouped");
-                      resetToBeginning("grouped");
+                      changeLayoutModeKeepingPosition("grouped");
                     }}
                     className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
                       layoutMode === "grouped"
@@ -1476,6 +1725,20 @@ export default function Home() {
                     }`}
                   >
                     2文グループ
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      changeLayoutModeKeepingPosition("horizontal");
+                    }}
+                    className={`rounded-xl px-4 py-3 text-sm font-bold transition ${
+                      layoutMode === "horizontal"
+                        ? "bg-white text-gray-950 shadow-sm"
+                        : "text-gray-500"
+                    }`}
+                  >
+                    横書き
                   </button>
                 </div>
 
@@ -1548,9 +1811,17 @@ export default function Home() {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm font-bold text-gray-700">
-                    {readerMode === "reading"
-                      ? "通常読書モード"
-                      : "共有表示モード"}
+                    {layoutMode === "normal"
+                      ? readerMode === "reading"
+                        ? "通常段落モード"
+                        : "共有表示モード（通常段落）"
+                      : layoutMode === "grouped"
+                        ? readerMode === "reading"
+                          ? "2文グループモード"
+                          : "共有表示モード（2文グループ）"
+                        : readerMode === "reading"
+                          ? "横書きモード"
+                          : "共有表示モード（横書き）"}
                   </p>
                 </div>
 
@@ -1563,19 +1834,68 @@ export default function Home() {
             <div
               ref={readingAreaRef}
               onScroll={updateActiveUnitByCenter}
-              className="relative h-[75vh] overflow-x-auto overflow-y-hidden px-8 py-8"
+              className={`relative h-[75vh] px-8 py-8 ${
+                layoutMode === "horizontal"
+                  ? "overflow-y-auto overflow-x-hidden"
+                  : "overflow-x-auto overflow-y-hidden"
+              }`}
             >
-              <div
-                className={`h-full font-serif text-[1.3rem] text-gray-900 ${
-                  layoutMode === "normal"
-                    ? "leading-[2.1] tracking-[0.03em]"
-                    : "leading-[2.4] tracking-[0.08em]"
-                }`}
-                style={{
-                  writingMode: "vertical-rl",
-                  textOrientation: "mixed",
-                }}
-              >
+              {layoutMode === "horizontal" ? (
+                <div className="horizontal-reading-content font-serif text-[1.3rem] leading-[2.1] tracking-[0.03em] text-gray-900">
+                  {paragraphs.map((paragraph, index) => {
+                    const paragraphUnits =
+                      readingUnitsByParagraph.get(index) ?? [];
+
+                    const isParagraphActive =
+                      currentReadingUnit?.paragraphIndex === index;
+
+                    const readersInParagraph = admittedParticipants.filter(
+                      (participant) => {
+                        const readerUnit =
+                          readingUnits[participant.paragraphIndex];
+                        return readerUnit?.paragraphIndex === index;
+                      },
+                    );
+
+                    return (
+                      <div
+                        key={`${selectedStory}-horizontal-${index}`}
+                        ref={(element) => {
+                          const firstUnit = paragraphUnits[0];
+                          if (firstUnit) {
+                            paragraphRefs.current[firstUnit.unitIndex] =
+                              element as HTMLDivElement | null;
+                          }
+                        }}
+                        onClick={() => {
+                          const firstUnit = paragraphUnits[0];
+                          if (firstUnit) {
+                            handleParagraphClick(firstUnit.unitIndex);
+                          }
+                        }}
+                        className={`horizontal-reading-unit ${
+                          isParagraphActive ? "is-active" : ""
+                        } ${paragraph.isHeading ? "reading-heading-unit" : ""}`}
+                        onMouseUp={wordSelectHandlers.onMouseUp}
+                        dangerouslySetInnerHTML={{
+                          __html: decorateText(paragraph.text),
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              ) : (
+                <div
+                  className={`h-full font-serif text-[1.3rem] text-gray-900 ${
+                    layoutMode === "normal"
+                      ? "leading-[2.1] tracking-[0.03em]"
+                      : "leading-[2.4] tracking-[0.08em]"
+                  }`}
+                  style={{
+                    writingMode: "vertical-rl",
+                    textOrientation: "mixed",
+                  }}
+                >
                 {paragraphs.map((paragraph, index) => {
                   const paragraphUnits =
                     readingUnitsByParagraph.get(index) ?? [];
@@ -1602,24 +1922,12 @@ export default function Home() {
                       }}
                       className={`relative transition ${
                         layoutMode === "normal"
-                          ? `ml-4 py-1 ${
-                              isParagraphActive ? "bg-yellow-50/40" : ""
-                            }`
-                          : `paragraph-cluster ml-8 rounded-2xl px-4 py-4 ${
+                          ? `normal-reading-unit ml-4 py-1 ${
                               isParagraphActive ? "is-active" : ""
                             }`
+                          : "ml-8 px-0 py-0"
                       }`}
                     >
-                      {isParagraphActive && (
-                        <div
-                          className={`absolute right-0 top-0 h-full w-1 rounded-full ${
-                            layoutMode === "normal"
-                              ? "bg-yellow-200"
-                              : "bg-yellow-300"
-                          }`}
-                        />
-                      )}
-
                       {layoutMode === "normal" ? (
                         <>
                           <p
@@ -1635,7 +1943,7 @@ export default function Home() {
                             }`}
                             {...wordSelectHandlers}
                             dangerouslySetInnerHTML={{
-                              __html: paragraph.text,
+                              __html: decorateText(paragraph.text),
                             }}
                           />
 
@@ -1691,7 +1999,7 @@ export default function Home() {
                                 <span
                                   className="reading-unit-inner"
                                   dangerouslySetInnerHTML={{
-                                    __html: unit.html,
+                                    __html: decorateText(unit.html),
                                   }}
                                 />
 
@@ -1720,7 +2028,8 @@ export default function Home() {
                     </div>
                   );
                 })}
-              </div>
+                </div>
+              )}
             </div>
 
             <div className="border-t border-gray-100 px-6 py-5">
