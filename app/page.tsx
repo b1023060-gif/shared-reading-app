@@ -42,8 +42,7 @@ type Reaction = {
 
 type ReaderMode = "reading" | "shared";
 type LayoutMode = "normal" | "grouped" | "horizontal";
-type AutoSpeedMode = "slow" | "normal" | "fast";
-
+type LoadMode = "preset" | "search" | "url";
 type Paragraph = {
   text: string;
   isHeading?: boolean;
@@ -658,10 +657,277 @@ function buildReadingUnits(paragraphs: Paragraph[]) {
   return units;
 }
 
+
+const AOZORA_PROXY_URL = "https://api.allorigins.win/raw?url=";
+
+type LoadedAozoraText = {
+  title: string;
+  author: string;
+  rawText: string;
+  sourceUrl: string;
+};
+
+type AozoraSearchBook = {
+  id: string;
+  title: string;
+  author: string;
+  cardUrl: string;
+  htmlUrl: string;
+  firstLine: string;
+  characters: number;
+  updatedAt: string;
+};
+
+const RECENT_AOZORA_BOOKS_KEY = "sharedReadingRecentAozoraBooks_v1";
+const AOZORA_BOOK_API_URL = "https://api.bungomail.com/v0/books";
+
+function decodeHtmlEntity(text: string) {
+  if (typeof document === "undefined") {
+    return text
+      .replace(/&nbsp;/g, " ")
+      .replace(/&lt;/g, "＜")
+      .replace(/&gt;/g, "＞")
+      .replace(/&amp;/g, "＆")
+      .replace(/&quot;/g, '"');
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = text;
+  return textarea.value;
+}
+
+function stripHtmlTags(html: string) {
+  return decodeHtmlEntity(html.replace(/<[^>]+>/g, "")).trim();
+}
+
+function fetchTextThroughProxy(url: string) {
+  return fetch(`${AOZORA_PROXY_URL}${encodeURIComponent(url)}`).then(
+    async (response) => {
+      if (!response.ok) {
+        throw new Error("青空文庫のページ取得に失敗しました");
+      }
+
+      return response.text();
+    },
+  );
+}
+
+async function fetchJsonThroughProxy<T>(url: string): Promise<T> {
+  try {
+    const response = await fetch(url);
+
+    if (response.ok) {
+      return (await response.json()) as T;
+    }
+  } catch {
+    // GitHub Pages上でCORSに止められた場合は公開プロキシ経由に切り替える。
+  }
+
+  const response = await fetch(`${AOZORA_PROXY_URL}${encodeURIComponent(url)}`);
+
+  if (!response.ok) {
+    throw new Error("青空文庫の検索に失敗しました");
+  }
+
+  return (await response.json()) as T;
+}
+
+function normalizeAozoraBook(rawBook: Record<string, unknown>): AozoraSearchBook {
+  const title = String(rawBook["作品名"] ?? "青空文庫作品");
+  const author = String(rawBook["姓名"] ?? "作者不明");
+  const id = String(rawBook["作品ID"] ?? `${title}-${author}`);
+
+  return {
+    id,
+    title,
+    author,
+    cardUrl: String(rawBook["図書カードURL"] ?? ""),
+    htmlUrl: String(rawBook["XHTML/HTMLファイルURL"] ?? ""),
+    firstLine: String(rawBook["書き出し"] ?? ""),
+    characters: Number(rawBook["文字数"] ?? 0),
+    updatedAt: String(rawBook["最終更新日"] ?? ""),
+  };
+}
+
+function escapeAozoraSearchPattern(keyword: string) {
+  return keyword.replace(/[\/]/g, "").trim();
+}
+
+async function searchAozoraBooks(keyword: string) {
+  const safeKeyword = escapeAozoraSearchPattern(keyword);
+
+  if (!safeKeyword) return [];
+
+  const searchParams = new URLSearchParams({
+    "作品名": `/${safeKeyword}/`,
+    limit: "12",
+  });
+
+  const data = await fetchJsonThroughProxy<{ books?: Record<string, unknown>[] }>(
+    `${AOZORA_BOOK_API_URL}?${searchParams.toString()}`,
+  );
+
+  return (data.books ?? [])
+    .map(normalizeAozoraBook)
+    .filter((book) => book.cardUrl || book.htmlUrl);
+}
+
+function loadRecentAozoraBooksFromStorage() {
+  if (typeof window === "undefined") return [] as AozoraSearchBook[];
+
+  try {
+    const rawBooks = localStorage.getItem(RECENT_AOZORA_BOOKS_KEY);
+    if (!rawBooks) return [];
+
+    const books = JSON.parse(rawBooks) as AozoraSearchBook[];
+    return Array.isArray(books) ? books.slice(0, 6) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentAozoraBooksToStorage(books: AozoraSearchBook[]) {
+  if (typeof window === "undefined") return;
+
+  localStorage.setItem(
+    RECENT_AOZORA_BOOKS_KEY,
+    JSON.stringify(books.slice(0, 6)),
+  );
+}
+
+function getAbsoluteAozoraUrl(href: string, baseUrl: string) {
+  return new URL(href, baseUrl).toString();
+}
+
+function extractXhtmlUrlFromCard(cardHtml: string, cardUrl: string) {
+  const documentObject = new DOMParser().parseFromString(cardHtml, "text/html");
+  const links = Array.from(documentObject.querySelectorAll("a"));
+
+  const xhtmlLink = links.find((link) => {
+    const href = link.getAttribute("href") ?? "";
+    const label = link.textContent ?? "";
+
+    return href.includes("files/") && href.endsWith(".html") && label.includes("XHTML");
+  });
+
+  const fallbackHtmlLink = links.find((link) => {
+    const href = link.getAttribute("href") ?? "";
+    return href.includes("files/") && href.endsWith(".html");
+  });
+
+  const targetHref =
+    xhtmlLink?.getAttribute("href") ?? fallbackHtmlLink?.getAttribute("href");
+
+  if (!targetHref) return null;
+
+  return getAbsoluteAozoraUrl(targetHref, cardUrl);
+}
+
+function convertRubyHtmlToAozoraNotation(html: string) {
+  return html.replace(/<ruby[^>]*>([\s\S]*?)<\/ruby>/gi, (_, rubyInner) => {
+    const withoutRp = rubyInner.replace(/<rp[^>]*>[\s\S]*?<\/rp>/gi, "");
+    const rt = stripHtmlTags(
+      withoutRp.match(/<rt[^>]*>([\s\S]*?)<\/rt>/i)?.[1] ?? "",
+    );
+
+    const base = stripHtmlTags(
+      withoutRp
+        .replace(/<rt[^>]*>[\s\S]*?<\/rt>/gi, "")
+        .replace(/<rb[^>]*>/gi, "")
+        .replace(/<\/rb>/gi, ""),
+    );
+
+    if (!base || !rt) return base || rt;
+
+    return `｜${base}《${rt}》`;
+  });
+}
+
+function htmlToPlainAozoraBody(mainHtml: string) {
+  return decodeHtmlEntity(
+    convertRubyHtmlToAozoraNotation(mainHtml)
+      .replace(/<br\s*\/?\s*>/gi, "\n")
+      .replace(/<\/p>/gi, "\n")
+      .replace(/<div[^>]*>/gi, "\n")
+      .replace(/<\/div>/gi, "\n")
+      .replace(/<[^>]+>/g, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim(),
+  );
+}
+
+function parseAozoraXhtml(html: string, sourceUrl: string): LoadedAozoraText {
+  const documentObject = new DOMParser().parseFromString(html, "text/html");
+
+  const title =
+    documentObject.querySelector("h1.title")?.textContent?.trim() ||
+    documentObject.querySelector("title")?.textContent?.trim() ||
+    "青空文庫作品";
+
+  const author =
+    documentObject.querySelector("h2.author")?.textContent?.trim() ||
+    "作者不明";
+
+  const mainTextElement = documentObject.querySelector(".main_text");
+
+  if (!mainTextElement) {
+    throw new Error("本文部分が見つかりませんでした");
+  }
+
+  const body = htmlToPlainAozoraBody(mainTextElement.innerHTML);
+
+  return {
+    title,
+    author,
+    rawText: `${title}\n${author}\n${body}`,
+    sourceUrl,
+  };
+}
+
+async function loadAozoraTextFromUrl(url: string): Promise<LoadedAozoraText> {
+  const parsedUrl = new URL(url);
+
+  if (!parsedUrl.hostname.endsWith("aozora.gr.jp")) {
+    throw new Error("青空文庫のURLだけ対応しています");
+  }
+
+  let targetUrl = parsedUrl.toString();
+
+  if (targetUrl.includes("/card")) {
+    const cardHtml = await fetchTextThroughProxy(targetUrl);
+    const xhtmlUrl = extractXhtmlUrlFromCard(cardHtml, targetUrl);
+
+    if (!xhtmlUrl) {
+      throw new Error("図書カードからXHTML版のリンクを見つけられませんでした");
+    }
+
+    targetUrl = xhtmlUrl;
+  }
+
+  const html = await fetchTextThroughProxy(targetUrl);
+  return parseAozoraXhtml(html, targetUrl);
+}
+
 export default function Home() {
   const [readerMode, setReaderMode] = useState<ReaderMode>("reading");
 
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("normal");
+
+  const [loadMode, setLoadMode] = useState<LoadMode>("preset");
+
+  const [aozoraUrl, setAozoraUrl] = useState("");
+  const [aozoraSearchQuery, setAozoraSearchQuery] = useState("");
+  const [aozoraSearchResults, setAozoraSearchResults] = useState<
+    AozoraSearchBook[]
+  >([]);
+  const [recentAozoraBooks, setRecentAozoraBooks] = useState<
+    AozoraSearchBook[]
+  >([]);
+  const [customTitle, setCustomTitle] = useState("");
+  const [customAuthor, setCustomAuthor] = useState("");
+  const [isLoadingAozora, setIsLoadingAozora] = useState(false);
+  const [isSearchingAozora, setIsSearchingAozora] = useState(false);
+  const [aozoraLoadError, setAozoraLoadError] = useState("");
 
   const [participantId, setParticipantId] = useState("");
   const [joinedAt, setJoinedAt] = useState(0);
@@ -686,6 +952,7 @@ export default function Home() {
   const [isAutoScroll, setIsAutoScroll] = useState(false);
   const [autoSpeed, setAutoSpeed] = useState(17);
   const [readingProgressNotice, setReadingProgressNotice] = useState("");
+  const [returnIndex, setReturnIndex] = useState<number | null>(null);
   const [storyProgressSummaries, setStoryProgressSummaries] = useState<
     Partial<Record<StoryKey, StoryProgressSummary>>
   >({});
@@ -799,6 +1066,7 @@ export default function Home() {
     if (nextMode === layoutModeRef.current) return;
 
     setIsAutoScroll(false);
+    setReturnIndex(null);
 
     const currentUnit = readingUnits[currentParagraphIndexRef.current];
     const currentParagraphIndex =
@@ -832,6 +1100,151 @@ export default function Home() {
 
   const refreshStoryProgressSummaries = () => {
     setStoryProgressSummaries(loadAllStoryProgressSummaries());
+  };
+
+  const rememberRecentAozoraBook = (book: AozoraSearchBook) => {
+    const nextBooks = [
+      book,
+      ...recentAozoraBooks.filter((recentBook) => recentBook.id !== book.id),
+    ].slice(0, 6);
+
+    setRecentAozoraBooks(nextBooks);
+    saveRecentAozoraBooksToStorage(nextBooks);
+  };
+
+  const openLoadedAozoraText = (loadedText: LoadedAozoraText) => {
+    const cleanedParagraphs = cleanAozoraText(
+      loadedText.rawText,
+      loadedText.title,
+      loadedText.author,
+    );
+
+    if (cleanedParagraphs.length === 0) {
+      throw new Error("本文を整形できませんでした");
+    }
+
+    setCustomTitle(loadedText.title);
+    setCustomAuthor(loadedText.author);
+    setParagraphs(cleanedParagraphs);
+    setSelectedWord("");
+    setSearchWord("");
+    setWikiMeaning("");
+    setIsAutoScroll(false);
+    setReturnIndex(null);
+
+    setCurrentParagraphIndex(0);
+    currentParagraphIndexRef.current = 0;
+    paragraphRefs.current = [];
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        scrollToFocus(0, layoutModeRef.current);
+
+        window.setTimeout(() => {
+          isRestoringProgressRef.current = false;
+        }, 300);
+      });
+    });
+  };
+
+  const handleSearchAozoraBooks = async () => {
+    const keyword = aozoraSearchQuery.trim();
+
+    if (!keyword) {
+      setAozoraLoadError("検索したい作品名を入力してください");
+      return;
+    }
+
+    setIsSearchingAozora(true);
+    setAozoraLoadError("");
+
+    try {
+      const books = await searchAozoraBooks(keyword);
+      setAozoraSearchResults(books);
+
+      if (books.length === 0) {
+        setAozoraLoadError("作品が見つかりませんでした。表記を少し変えて検索してください");
+      }
+    } catch (error) {
+      console.error(error);
+      setAozoraLoadError(
+        error instanceof Error ? error.message : "青空文庫の検索に失敗しました",
+      );
+    } finally {
+      setIsSearchingAozora(false);
+    }
+  };
+
+  const handleOpenAozoraBook = async (book: AozoraSearchBook) => {
+    const targetUrl = book.htmlUrl || book.cardUrl;
+
+    if (!targetUrl) {
+      setAozoraLoadError("この作品のURLが見つかりませんでした");
+      return;
+    }
+
+    setIsLoadingAozora(true);
+    setAozoraLoadError("");
+    isRestoringProgressRef.current = true;
+
+    try {
+      const loadedText = await loadAozoraTextFromUrl(targetUrl);
+      openLoadedAozoraText(loadedText);
+      setAozoraUrl(targetUrl);
+      rememberRecentAozoraBook(book);
+    } catch (error) {
+      console.error(error);
+      setAozoraLoadError(
+        error instanceof Error ? error.message : "青空文庫の読み込みに失敗しました",
+      );
+      isRestoringProgressRef.current = false;
+    } finally {
+      setIsLoadingAozora(false);
+    }
+  };
+
+  const handleLoadAozoraUrl = async () => {
+    const trimmedUrl = aozoraUrl.trim();
+
+    if (!trimmedUrl) {
+      setAozoraLoadError("青空文庫のURLを入力してください");
+      return;
+    }
+
+    setIsLoadingAozora(true);
+    setAozoraLoadError("");
+    setIsAutoScroll(false);
+    setReturnIndex(null);
+    isRestoringProgressRef.current = true;
+
+    try {
+      const loadedText = await loadAozoraTextFromUrl(trimmedUrl);
+      openLoadedAozoraText(loadedText);
+
+      const recentBook: AozoraSearchBook = {
+        id: loadedText.sourceUrl,
+        title: loadedText.title,
+        author: loadedText.author,
+        cardUrl: trimmedUrl,
+        htmlUrl: loadedText.sourceUrl,
+        firstLine: "",
+        characters: 0,
+        updatedAt: "",
+      };
+
+      rememberRecentAozoraBook(recentBook);
+    } catch (error) {
+      console.error(error);
+      const message =
+        error instanceof Error
+          ? error.message
+          : "青空文庫の読み込みに失敗しました";
+
+      setAozoraLoadError(message);
+      isRestoringProgressRef.current = false;
+    } finally {
+      setIsLoadingAozora(false);
+    }
   };
 
   const showReadingProgressNotice = (message: string) => {
@@ -923,6 +1336,8 @@ export default function Home() {
       setSelectedStory(lastState.storyKey);
       setLayoutMode(lastState.layoutMode);
     }
+
+    setRecentAozoraBooks(loadRecentAozoraBooksFromStorage());
 
     didLoadLastReadingStateRef.current = true;
   }, []);
@@ -1294,8 +1709,18 @@ export default function Home() {
   const moveToParagraph = (
     nextIndex: number,
     mode: LayoutMode = layoutMode,
+    options: { rememberReturnPoint?: boolean } = {},
   ) => {
     const safeIndex = Math.max(0, Math.min(nextIndex, readingUnits.length - 1));
+
+    if (
+      options.rememberReturnPoint &&
+      returnIndex === null &&
+      safeIndex !== currentParagraphIndexRef.current
+    ) {
+      setReturnIndex(currentParagraphIndexRef.current);
+      showReadingProgressNotice("元の位置を一時保存しました");
+    }
 
     setCurrentParagraphIndex(safeIndex);
     currentParagraphIndexRef.current = safeIndex;
@@ -1325,6 +1750,7 @@ export default function Home() {
   const moveToNormalParagraph = (
     nextParagraphIndex: number,
     mode: LayoutMode = layoutMode,
+    options: { rememberReturnPoint?: boolean } = {},
   ) => {
     const safeParagraphIndex = Math.max(
       0,
@@ -1335,7 +1761,7 @@ export default function Home() {
 
     if (!firstUnit) return;
 
-    moveToParagraph(firstUnit.unitIndex, mode);
+    moveToParagraph(firstUnit.unitIndex, mode, options);
   };
 
   useEffect(() => {
@@ -1522,11 +1948,17 @@ export default function Home() {
       event.preventDefault();
 
       if (layoutMode === "normal") {
-        moveToNormalParagraph(activeParagraphIndex - 1, layoutMode);
+        moveToNormalParagraph(activeParagraphIndex - 1, layoutMode, {
+          rememberReturnPoint: true,
+        });
       } else if (layoutMode === "horizontal") {
-        moveToNormalParagraph(activeParagraphIndex - 1, "horizontal");
+        moveToNormalParagraph(activeParagraphIndex - 1, "horizontal", {
+          rememberReturnPoint: true,
+        });
       } else {
-        moveToParagraph(currentParagraphIndexRef.current - 1, layoutMode);
+        moveToParagraph(currentParagraphIndexRef.current - 1, layoutMode, {
+          rememberReturnPoint: true,
+        });
       }
     }
 
@@ -1537,7 +1969,9 @@ export default function Home() {
 
     if (key === "arrowup" && layoutMode === "horizontal") {
       event.preventDefault();
-      moveToNormalParagraph(activeParagraphIndex - 1, "horizontal");
+      moveToNormalParagraph(activeParagraphIndex - 1, "horizontal", {
+        rememberReturnPoint: true,
+      });
     }
 
     if (key === "s") {
@@ -1554,6 +1988,36 @@ export default function Home() {
       event.preventDefault();
       setIsAutoScroll((prev) => !prev);
     }
+
+    if (key === "b") {
+      event.preventDefault();
+      handleMarkReturnPoint();
+    }
+
+    if (key === "v") {
+      event.preventDefault();
+      handleReturnToSavedIndex();
+    }
+  };
+
+  const handleMarkReturnPoint = () => {
+    if (readingUnits.length <= 0) return;
+
+    setReturnIndex(currentParagraphIndexRef.current);
+    showReadingProgressNotice("ここに戻る位置を保存しました");
+  };
+
+  const handleReturnToSavedIndex = () => {
+    if (returnIndex === null) return;
+
+    const targetIndex = Math.max(
+      0,
+      Math.min(returnIndex, readingUnits.length - 1),
+    );
+
+    moveToParagraph(targetIndex, layoutModeRef.current);
+    setReturnIndex(null);
+    showReadingProgressNotice("元の位置へ戻りました");
   };
 
   const handleParagraphClick = (index: number) => {
@@ -1607,11 +2071,11 @@ export default function Home() {
               </div>
 
               <h1 className="font-serif text-5xl font-bold tracking-[-0.04em] text-gray-950">
-                {stories[selectedStory].title}
+                {customTitle || stories[selectedStory].title}
               </h1>
 
               <p className="mt-3 text-lg font-semibold text-gray-500">
-                {stories[selectedStory].author}
+                {customAuthor || stories[selectedStory].author}
               </p>
 
               <div className="mt-6 inline-flex items-center gap-3 rounded-2xl border border-[#eee3d2] bg-[#fffaf0] px-5 py-3 text-sm font-bold text-gray-700">
@@ -1627,15 +2091,65 @@ export default function Home() {
 
             <div className="rounded-[1.5rem] border border-gray-100 bg-gray-50/80 p-4">
               <div className="grid gap-3">
+                <div className="rounded-2xl bg-white p-4 shadow-sm">
+  <p className="mb-3 text-sm font-bold text-gray-800">
+    本の読み込み方法
+  </p>
+
+  <div className="grid grid-cols-3 gap-2 rounded-2xl bg-gray-100 p-1">
+    <button
+      type="button"
+      onClick={() => setLoadMode("preset")}
+      className={`rounded-xl px-3 py-2 text-xs font-bold transition ${
+        loadMode === "preset"
+          ? "bg-white text-gray-950 shadow-sm"
+          : "text-gray-500"
+      }`}
+    >
+      登録済み
+    </button>
+
+    <button
+      type="button"
+      onClick={() => setLoadMode("search")}
+      className={`rounded-xl px-3 py-2 text-xs font-bold transition ${
+        loadMode === "search"
+          ? "bg-white text-gray-950 shadow-sm"
+          : "text-gray-500"
+      }`}
+    >
+      青空検索
+    </button>
+
+    <button
+      type="button"
+      onClick={() => setLoadMode("url")}
+      className={`rounded-xl px-3 py-2 text-xs font-bold transition ${
+        loadMode === "url"
+          ? "bg-white text-gray-950 shadow-sm"
+          : "text-gray-500"
+      }`}
+    >
+      URL
+    </button>
+  </div>
+</div>
                 <select
                   value={selectedStory}
                   onChange={(event) => {
-                    setIsAutoScroll(false);
-                    setSelectedStory(event.target.value as StoryKey);
-                    setSelectedWord("");
-                    setSearchWord("");
-                    setWikiMeaning("");
-                  }}
+  setIsAutoScroll(false);
+  setReturnIndex(null);
+  setSelectedStory(event.target.value as StoryKey);
+  setSelectedWord("");
+  setSearchWord("");
+  setWikiMeaning("");
+  setCustomTitle("");
+  setCustomAuthor("");
+  setAozoraUrl("");
+  setAozoraSearchQuery("");
+  setAozoraSearchResults([]);
+  setAozoraLoadError("");
+}}
                   className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm font-bold shadow-sm outline-none"
                 >
                   {Object.entries(stories).map(([key, story]) => {
@@ -1652,6 +2166,145 @@ export default function Home() {
                     );
                   })}
                 </select>
+
+                <div className="rounded-2xl bg-white p-4 shadow-sm">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <p className="text-sm font-bold text-gray-800">
+                      青空文庫から本を探す
+                    </p>
+                    <span className="text-[0.68rem] font-bold text-gray-400">
+                      GitHub Pages対応
+                    </span>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <input
+                      type="search"
+                      value={aozoraSearchQuery}
+                      onChange={(event) => {
+                        setAozoraSearchQuery(event.target.value);
+                        setAozoraLoadError("");
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          handleSearchAozoraBooks();
+                        }
+                      }}
+                      placeholder="作品名で検索 例：走れメロス"
+                      className="min-w-0 flex-1 rounded-xl border border-gray-200 px-3 py-2 text-sm outline-none"
+                    />
+
+                    <button
+                      type="button"
+                      onClick={handleSearchAozoraBooks}
+                      disabled={isSearchingAozora}
+                      className="shrink-0 rounded-xl bg-yellow-300 px-4 py-2 text-sm font-bold text-gray-800 disabled:opacity-50"
+                    >
+                      {isSearchingAozora ? "検索中" : "検索"}
+                    </button>
+                  </div>
+
+                  {aozoraSearchResults.length > 0 && (
+                    <div className="mt-3 max-h-52 space-y-2 overflow-y-auto rounded-2xl bg-gray-50 p-2">
+                      {aozoraSearchResults.map((book) => (
+                        <button
+                          key={`${book.id}-${book.htmlUrl || book.cardUrl}`}
+                          type="button"
+                          onClick={() => handleOpenAozoraBook(book)}
+                          className="w-full rounded-xl bg-white px-3 py-2 text-left shadow-sm transition hover:bg-yellow-50"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-serif text-sm font-bold text-gray-900">
+                              {book.title}
+                            </span>
+                            <span className="shrink-0 rounded-full bg-yellow-100 px-2 py-1 text-[0.65rem] font-bold text-yellow-700">
+                              読む
+                            </span>
+                          </div>
+                          <div className="mt-1 text-xs font-bold text-gray-500">
+                            {book.author}
+                            {book.characters > 0 ? ` ／ ${book.characters.toLocaleString()}字` : ""}
+                          </div>
+                          {book.firstLine ? (
+                            <div className="mt-1 line-clamp-1 text-xs text-gray-400">
+                              {book.firstLine}
+                            </div>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {recentAozoraBooks.length > 0 && aozoraSearchResults.length === 0 && (
+                    <div className="mt-3 rounded-2xl bg-gray-50 p-3">
+                      <p className="mb-2 text-xs font-bold text-gray-500">
+                        最近読んだ青空文庫
+                      </p>
+                      <div className="grid gap-2">
+                        {recentAozoraBooks.map((book) => (
+                          <button
+                            key={`recent-${book.id}`}
+                            type="button"
+                            onClick={() => handleOpenAozoraBook(book)}
+                            className="rounded-xl bg-white px-3 py-2 text-left text-xs shadow-sm transition hover:bg-yellow-50"
+                          >
+                            <span className="font-bold text-gray-800">
+                              {book.title}
+                            </span>
+                            <span className="ml-2 text-gray-400">
+                              {book.author}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <details className="mt-3 rounded-2xl bg-white/80">
+                    <summary className="cursor-pointer text-xs font-bold text-gray-500">
+                      URLで直接開く
+                    </summary>
+
+                    <div className="mt-2 flex gap-2">
+                      <input
+                        type="url"
+                        value={aozoraUrl}
+                        onChange={(event) => {
+                          setAozoraUrl(event.target.value);
+                          setAozoraLoadError("");
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            handleLoadAozoraUrl();
+                          }
+                        }}
+                        placeholder="図書カードURLかXHTML版URL"
+                        className="min-w-0 flex-1 rounded-xl border border-gray-200 px-3 py-2 text-sm outline-none"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={handleLoadAozoraUrl}
+                        disabled={isLoadingAozora}
+                        className="shrink-0 rounded-xl bg-gray-900 px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+                      >
+                        {isLoadingAozora ? "読込中" : "開く"}
+                      </button>
+                    </div>
+                  </details>
+
+                  {aozoraLoadError ? (
+                    <p className="mt-2 text-xs font-bold text-red-500">
+                      {aozoraLoadError}
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-xs text-gray-400">
+                      作品名検索とURL読み込みの両方に対応しています。
+                    </p>
+                  )}
+                </div>
 
                 <div className="rounded-2xl bg-white px-4 py-3 text-xs font-bold text-gray-500 shadow-sm">
                   {storyProgressSummaries[selectedStory] ? (
@@ -1749,7 +2402,7 @@ export default function Home() {
                         オート読書
                       </p>
                       <p className="mt-1 text-xs font-medium text-gray-500">
-                        0にすると停止します。速度は自分の画面だけに反映されます。
+                        0にすると停止します。
                       </p>
                     </div>
 
@@ -1796,8 +2449,30 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="border-t border-gray-100 px-7 py-4 text-right text-sm text-gray-500">
-            ← 次へ ／ → 前へ ／ A = オート ／ S = 共有 ／ R = 一人読み
+          <div className="flex flex-col gap-3 border-t border-gray-100 px-7 py-4 text-sm text-gray-500 sm:flex-row sm:items-center sm:justify-between">
+            <span>
+              ← 次へ ／ → 前へ ／ A = オート ／ S = 共有 ／ R = 一人読み ／ B = ここに戻る ／ V = 戻る
+            </span>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleMarkReturnPoint}
+                className="rounded-xl bg-gray-100 px-4 py-2 text-sm font-bold text-gray-700 shadow-sm transition hover:bg-gray-200"
+              >
+                ここに戻る
+              </button>
+
+              {returnIndex !== null && (
+                <button
+                  type="button"
+                  onClick={handleReturnToSavedIndex}
+                  className="rounded-xl bg-yellow-300 px-4 py-2 text-sm font-bold text-gray-800 shadow-sm transition hover:bg-yellow-200"
+                >
+                  元の位置へ戻る
+                </button>
+              )}
+            </div>
           </div>
         </header>
 
@@ -1834,14 +2509,14 @@ export default function Home() {
             <div
               ref={readingAreaRef}
               onScroll={updateActiveUnitByCenter}
-              className={`relative h-[75vh] px-8 py-8 ${
+              className={`relative h-[75vh] px-16 py-12 ${
                 layoutMode === "horizontal"
                   ? "overflow-y-auto overflow-x-hidden"
                   : "overflow-x-auto overflow-y-hidden"
               }`}
             >
               {layoutMode === "horizontal" ? (
-                <div className="horizontal-reading-content font-serif text-[1.3rem] leading-[2.1] tracking-[0.03em] text-gray-900">
+                <div className="horizontal-reading-content font-serif text-[1.3rem] leading-[2.2] tracking-[0.03em] text-gray-900">
                   {paragraphs.map((paragraph, index) => {
                     const paragraphUnits =
                       readingUnitsByParagraph.get(index) ?? [];
@@ -1867,7 +2542,9 @@ export default function Home() {
                               element as HTMLDivElement | null;
                           }
                         }}
-                        onClick={() => {
+                        onClick={(event) => {
+                          wordSelectHandlers.onClick(event);
+
                           const firstUnit = paragraphUnits[0];
                           if (firstUnit) {
                             handleParagraphClick(firstUnit.unitIndex);
@@ -1877,10 +2554,30 @@ export default function Home() {
                           isParagraphActive ? "is-active" : ""
                         } ${paragraph.isHeading ? "reading-heading-unit" : ""}`}
                         onMouseUp={wordSelectHandlers.onMouseUp}
-                        dangerouslySetInnerHTML={{
-                          __html: decorateText(paragraph.text),
-                        }}
-                      />
+                      >
+                        <span
+                          className="horizontal-reading-unit-inner"
+                          dangerouslySetInnerHTML={{
+                            __html: decorateText(paragraph.text),
+                          }}
+                        />
+
+                        {readerMode === "shared" &&
+                          readersInParagraph.length > 0 && (
+                            <div className="reader-follow-badges marker-reader-badges horizontal-marker-reader-badges">
+                              {readersInParagraph.map((reader) => (
+                                <span
+                                  key={reader.id}
+                                  className={`reader-follow-badge ${
+                                    reader.id === participantId ? "is-me" : ""
+                                  }`}
+                                >
+                                  {getDisplayName(reader.name)}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                      </div>
                     );
                   })}
                 </div>
@@ -1889,7 +2586,7 @@ export default function Home() {
                   className={`h-full font-serif text-[1.3rem] text-gray-900 ${
                     layoutMode === "normal"
                       ? "leading-[2.1] tracking-[0.03em]"
-                      : "leading-[2.4] tracking-[0.08em]"
+                      : "leading-[2.1] tracking-[0.03em]"
                   }`}
                   style={{
                     writingMode: "vertical-rl",
@@ -1922,10 +2619,10 @@ export default function Home() {
                       }}
                       className={`relative transition ${
                         layoutMode === "normal"
-                          ? `normal-reading-unit ml-4 py-1 ${
-                              isParagraphActive ? "is-active" : ""
-                            }`
-                          : "ml-8 px-0 py-0"
+  ? `normal-reading-unit ml-8 py-4 ${
+      isParagraphActive ? "is-active" : ""
+    }`
+  : "grouped-paragraph-shell ml-8 py-4"
                       }`}
                     >
                       {layoutMode === "normal" ? (
@@ -1949,7 +2646,7 @@ export default function Home() {
 
                           {readerMode === "shared" &&
                             readersInParagraph.length > 0 && (
-                              <div className="reader-follow-badges normal-reader-follow-badges">
+                              <div className="reader-follow-badges marker-reader-badges normal-marker-reader-badges">
                                 {readersInParagraph.map((reader) => (
                                   <span
                                     key={reader.id}
@@ -1974,9 +2671,7 @@ export default function Home() {
 
                             const readersHere = admittedParticipants.filter(
                               (participant) =>
-                                Math.abs(
-                                  participant.paragraphIndex - unit.unitIndex,
-                                ) <= 1,
+                                participant.paragraphIndex === unit.unitIndex,
                             );
 
                             return (
@@ -2005,7 +2700,7 @@ export default function Home() {
 
                                 {readerMode === "shared" &&
                                   readersHere.length > 0 && (
-                                    <div className="reader-follow-badges">
+                                    <div className="reader-follow-badges marker-reader-badges grouped-marker-reader-badges">
                                       {readersHere.map((reader) => (
                                         <span
                                           key={reader.id}

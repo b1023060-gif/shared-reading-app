@@ -23,6 +23,7 @@ body {
   font-family: "Noto Serif JP", serif;
 }
 
+/* ルビ */
 ruby {
   ruby-position: over;
   ruby-align: center;
@@ -35,6 +36,7 @@ rt {
   user-select: none;
 }
 
+/* 辞書クリック単語 */
 .dict-word {
   display: inline;
   color: inherit;
@@ -60,6 +62,7 @@ rt {
   box-shadow: none;
 }
 
+/* 縦書き共通 */
 .vertical-reading-content {
   display: flex;
   flex-direction: row-reverse;
@@ -88,6 +91,48 @@ rt {
   background: transparent !important;
 }
 
+/* 通常段落モード */
+.normal-reading-unit {
+  position: relative !important;
+  overflow: visible;
+  z-index: 1;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+
+   padding-top: 1rem;
+}
+
+.normal-reading-unit.is-active {
+  position: relative !important;
+  background: rgba(254, 240, 138, 0.38) !important;
+  border-radius: 1.4rem !important;
+}
+
+.normal-reading-unit.is-active::before {
+  content: none !important;
+}
+
+.normal-reading-unit.is-active::after {
+  content: "" !important;
+  position: absolute !important;
+  top: 20px !important;
+  right: -2px !important;
+  bottom: 8px !important;
+  width: 5px !important;
+  border-radius: 999px !important;
+  background: #facc15 !important;
+  z-index: 20 !important;
+  display: block !important;
+  pointer-events: none !important;
+}
+
+.normal-reading-unit p {
+  position: relative !important;
+  z-index: 30 !important;
+}
+
+/* 2文グループモード */
 .two-sentence-layout {
   writing-mode: horizontal-tb !important;
   display: flex;
@@ -98,57 +143,52 @@ rt {
   width: max-content;
 }
 
-/* 騾壼ｸｸ谿ｵ關ｽ繝｢繝ｼ繝峨→2譁�げ繝ｫ繝ｼ繝励Δ繝ｼ繝峨〒蜷後§繝槭�繧ｫ繝ｼ濶ｲ繧剃ｽｿ縺� */
-.normal-reading-unit,
-.reading-unit {
+.grouped-paragraph-shell {
   position: relative;
-  border: none !important;
-  outline: none !important;
-  box-shadow: none !important;
-}
-
-.normal-reading-unit.is-active,
-.reading-unit.is-active {
-  background: rgba(254, 240, 138, 0.38) !important;
-  border-radius: 1rem;
-}
-
-/* 蜈ｱ騾壹�鮟�牡縺�ｸｦ繝槭�繧ｫ繝ｼ */
-.normal-reading-unit.is-active::after,
-.reading-unit.is-active::after {
-  content: "";
-  position: absolute;
-  top: 0.35rem;
-  right: 0.08rem;
-  bottom: 0.35rem;
-  width: 4px;
-  border-radius: 999px;
-  background: rgba(250, 204, 21, 0.95);
-  pointer-events: none;
-}
-
-/* 蜿､縺� before 繝槭�繧ｫ繝ｼ縺ｯ菴ｿ繧上↑縺� */
-.normal-reading-unit.is-active::before,
-.reading-unit.is-active::before {
-  content: none !important;
+  overflow: visible;
 }
 
 .reading-unit {
   writing-mode: vertical-rl !important;
   text-orientation: mixed;
+  position: relative !important;
   display: block;
   box-sizing: border-box;
   min-width: 3em;
   padding: 2.3rem 0.55em 0.7em 0.55em;
-  margin: 0;
+  margin: 0 0 0 2rem !important;
   font: inherit;
   line-height: 2.35;
   letter-spacing: 0.08em;
   color: inherit;
   cursor: pointer;
   overflow: visible;
-  border-radius: 1rem;
+  border-radius: 1.4rem;
   background: transparent;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.reading-unit.is-active {
+  background: rgba(254, 240, 138, 0.38) !important;
+  border-radius: 1.4rem !important;
+}
+
+.reading-unit.is-active::before {
+  content: none !important;
+}
+
+.reading-unit.is-active::after {
+  content: "" !important;
+  position: absolute !important;
+  top: 0.6rem !important;
+  right: 0.25rem !important;
+  bottom: 0.6rem !important;
+  width: 5px !important;
+  border-radius: 999px !important;
+  background: rgba(250, 204, 21, 0.95) !important;
+  pointer-events: none !important;
 }
 
 .reading-unit:focus {
@@ -162,6 +202,7 @@ rt {
   display: inline;
 }
 
+/* 見出し */
 .reading-heading-unit {
   font-weight: 700;
   font-size: 1.25em;
@@ -173,17 +214,9 @@ rt {
   background: rgba(254, 240, 138, 0.38) !important;
 }
 
-.normal-paragraph {
-  position: relative;
-  padding-top: 1rem;
-  padding-bottom: 1rem;
-}
-
+/* 参加者名札 */
 .reader-follow-badges {
   position: absolute;
-  top: -2rem !important;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -193,11 +226,34 @@ rt {
   text-orientation: mixed !important;
   z-index: 999;
   pointer-events: none;
+  left: auto !important;
+  transform: none !important;
 }
 
 .normal-reader-follow-badges {
-  top: 0.15rem !important;
-  left: 50%;
+  top: 0.4rem !important;
+  right: 1rem !important;
+}
+
+.marker-reader-badges {
+  left: auto !important;
+  transform: none !important;
+}
+
+.normal-marker-reader-badges {
+  top: -2.8rem !important;
+  right: 0.6rem !important;
+}
+
+.grouped-marker-reader-badges {
+  top: 0.4rem !important;
+  right: 1rem !important;
+}
+
+.horizontal-marker-reader-badges {
+  top: -1.45rem !important;
+  left: 0.1rem !important;
+  right: auto !important;
 }
 
 .reader-follow-badge {
@@ -228,6 +284,7 @@ rt {
   border-color: rgba(252, 211, 77, 0.95);
 }
 
+/* 使わなくなった古い表示 */
 .reader-labels,
 .reader-label,
 .reader-labels-horizontal,
@@ -244,42 +301,61 @@ rt {
   display: none !important;
 }
 
-
-/* 讓ｪ譖ｸ縺咲ｸｦ繧ｹ繧ｯ繝ｭ繝ｼ繝ｫ繝｢繝ｼ繝� */
+/* 横書きモード */
 .horizontal-reading-content {
-  width: 100%;
-  min-height: 100%;
+  display: block !important;
   writing-mode: horizontal-tb !important;
   text-orientation: mixed !important;
+  width: 100%;
+  max-width: 900px;
+  min-height: auto !important;
+  height: auto !important;
+  margin: 0 auto;
+  padding: 2rem 0 55vh 0;
 }
 
 .horizontal-reading-unit {
+  writing-mode: horizontal-tb !important;
+  text-orientation: mixed !important;
   position: relative;
-  max-width: 42rem;
-  margin-left: auto;
-  margin-right: auto;
+  display: block;
+  max-width: 46rem;
+  margin: 0 auto 3rem auto !important;
+  padding: 1.2rem 2rem 1.2rem 3rem !important;
+  line-height: 2.1;
+  cursor: pointer;
   border: none !important;
   outline: none !important;
   box-shadow: none !important;
+  border-radius: 1.4rem;
+  background: transparent;
+}
+
+.horizontal-reading-unit p,
+.horizontal-reading-unit-inner {
+  margin: 0;
+  position: relative;
+  z-index: 1;
 }
 
 .horizontal-reading-unit.is-active {
   background: rgba(254, 240, 138, 0.38) !important;
-  border-radius: 1rem;
-}
-
-.horizontal-reading-unit.is-active::after {
-  content: "";
-  position: absolute;
-  top: 0.35rem;
-  left: 0.25rem;
-  bottom: 0.35rem;
-  width: 4px;
-  border-radius: 999px;
-  background: rgba(250, 204, 21, 0.95);
-  pointer-events: none;
+  border-radius: 1.4rem !important;
+  box-shadow: none !important;
 }
 
 .horizontal-reading-unit.is-active::before {
   content: none !important;
+}
+
+.horizontal-reading-unit.is-active::after {
+  content: "" !important;
+  position: absolute !important;
+  top: 1rem !important;
+  bottom: 1rem !important;
+  left: 0.8rem !important;
+  width: 5px !important;
+  border-radius: 999px !important;
+  background: rgba(250, 204, 21, 0.95) !important;
+  pointer-events: none;
 }
